@@ -1,9 +1,9 @@
 import re
 
 
-# --------------------------------------------------
-# Convert natural language operators into symbols
-# --------------------------------------------------
+# ---------------------------------------------------------
+# Operator patterns
+# ---------------------------------------------------------
 
 OPERATOR_PATTERNS = [
     (r"\bat least\b", ">="),
@@ -20,16 +20,16 @@ OPERATOR_PATTERNS = [
     (r"\bless than\b", "<"),
 
     (r">=", ">="),
-    (r"<=", "<="),
+    (r"<=", "<"),
     (r">", ">"),
-    (r"<", ">"),
-    (r"=", "=")
+    (r"<", "<"),
+    (r"=", "="),
 ]
 
 
-# --------------------------------------------------
+# ---------------------------------------------------------
 # Attribute aliases
-# --------------------------------------------------
+# ---------------------------------------------------------
 
 ATTRIBUTE_ALIASES = {
     "battery backup": "Battery Backup",
@@ -42,21 +42,47 @@ ATTRIBUTE_ALIASES = {
     "ecg channel": "ECG Channels",
 
     "display size": "Display Size",
-    "display": "Display Size",
+    "screen size": "Display Size",
 
     "temperature channels": "Temperature Channels",
-    "temperature channel": "Temperature Channels"
+    "temperature channel": "Temperature Channels",
+
+    "nibp measurement": "NIBP Measurement",
+    "nibp": "NIBP Measurement",
+
+    "spo2 range": "SpO₂ Range",
+    "spo2": "SpO₂ Range",
+
+    "flow rate": "Flow Rate",
+
+    "sampling rate": "Sampling Rate",
 }
 
 
-# --------------------------------------------------
+# ---------------------------------------------------------
+# Capability / boolean keywords
+# ---------------------------------------------------------
+
+CAPABILITY_PATTERNS = [
+    r"\brequired\b",
+    r"\bmust be supported\b",
+    r"\bshould be supported\b",
+    r"\bmust be available\b",
+    r"\bshould be available\b",
+    r"\bis required\b",
+    r"\bis supported\b",
+    r"\bis available\b",
+]
+
+
+# ---------------------------------------------------------
 # Find attribute
-# --------------------------------------------------
+# ---------------------------------------------------------
 
 def find_attribute(query):
-
     query_lower = query.lower()
 
+    # Longer aliases first
     aliases = sorted(
         ATTRIBUTE_ALIASES.keys(),
         key=len,
@@ -64,53 +90,44 @@ def find_attribute(query):
     )
 
     for alias in aliases:
-
         if alias in query_lower:
             return ATTRIBUTE_ALIASES[alias]
 
     return None
 
 
-# --------------------------------------------------
+# ---------------------------------------------------------
 # Find operator
-# --------------------------------------------------
+# ---------------------------------------------------------
 
 def find_operator(query):
-
     query_lower = query.lower()
 
     for pattern, operator in OPERATOR_PATTERNS:
-
         if re.search(pattern, query_lower):
             return operator
 
     return None
 
 
-# --------------------------------------------------
+# ---------------------------------------------------------
 # Find numeric value and unit
-# --------------------------------------------------
+# ---------------------------------------------------------
 
 def find_value_and_unit(query):
 
     pattern = (
         r"(\d+(?:\.\d+)?)\s*"
-        r"(hours?|hrs?|kg|inch|inches|bpm|samples/sec)"
+        r"(hours?|hrs?|kg|inch|inches|bpm|samples/sec)?"
     )
 
-    match = re.search(
-        pattern,
-        query.lower()
-    )
+    match = re.search(pattern, query.lower())
 
     if not match:
         return None, None
 
     value = float(match.group(1))
-
     unit = match.group(2)
-
-    # Normalize units
 
     if unit in ["hour", "hours", "hr", "hrs"]:
         unit = "hours"
@@ -130,9 +147,23 @@ def find_value_and_unit(query):
     return value, unit
 
 
-# --------------------------------------------------
+# ---------------------------------------------------------
+# Detect capability requirement
+# ---------------------------------------------------------
+
+def is_capability_requirement(query):
+    query_lower = query.lower()
+
+    for pattern in CAPABILITY_PATTERNS:
+        if re.search(pattern, query_lower):
+            return True
+
+    return False
+
+
+# ---------------------------------------------------------
 # Parse complete requirement
-# --------------------------------------------------
+# ---------------------------------------------------------
 
 def parse_requirement(query):
 
@@ -141,6 +172,14 @@ def parse_requirement(query):
     operator = find_operator(query)
 
     value, unit = find_value_and_unit(query)
+
+    # If this is a capability requirement,
+    # interpret it as "must be supported".
+    if is_capability_requirement(query):
+
+        operator = "="
+        value = 1
+        unit = None
 
     return {
         "original_query": query,
@@ -151,39 +190,41 @@ def parse_requirement(query):
     }
 
 
-# --------------------------------------------------
-# Test parser only when this file is run directly
-# --------------------------------------------------
+# ---------------------------------------------------------
+# Testing
+# ---------------------------------------------------------
 
 if __name__ == "__main__":
 
-    query = input("Enter your requirement: ")
+    test_queries = [
 
-    requirement = parse_requirement(query)
+        "Battery backup must be at least 4 hours",
 
-    print("\n--- Parsed Requirement ---\n")
+        "Weight should be at most 8 kg",
 
-    print(
-        f"Original Query : "
-        f"{requirement['original_query']}"
-    )
+        "ECG channels >= 5",
 
-    print(
-        f"Attribute      : "
-        f"{requirement['attribute']}"
-    )
+        "Display size >= 10 inch",
 
-    print(
-        f"Operator       : "
-        f"{requirement['operator']}"
-    )
+        "Temperature channels more than 4",
 
-    print(
-        f"Value          : "
-        f"{requirement['value']}"
-    )
+        "NIBP measurement must be supported",
 
-    print(
-        f"Unit           : "
-        f"{requirement['unit']}"
-    )
+        "NIBP is required",
+
+        "NIBP should be available",
+
+    ]
+
+    print("\n--- Requirement Parser Test ---\n")
+
+    for query in test_queries:
+
+        requirement = parse_requirement(query)
+
+        print(f"Original Query : {requirement['original_query']}")
+        print(f"Attribute      : {requirement['attribute']}")
+        print(f"Operator       : {requirement['operator']}")
+        print(f"Value          : {requirement['value']}")
+        print(f"Unit           : {requirement['unit']}")
+        print("-" * 60)

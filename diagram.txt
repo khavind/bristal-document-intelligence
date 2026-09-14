@@ -1,0 +1,72 @@
+###########  Progress Completed
+
+
+PDF Extraction
+      ↓
+Text Normalization
+      ↓
+Document Chunking
+      ↓
+Specification Extraction
+      ↓
+Embeddings & Semantic Search
+      ↓
+Requirement Parsing
+      ↓
+Value Parsing
+      ↓
+PASS / FAIL / UNKNOWN Evaluation
+      ↓
+Product Matching
+
+
+
+
+
+
+
+
+PDF → structured information
+
+    python src/ingestion/pdf_extractor.py
+
+    python src/ingestion/chunker.py
+
+structured specifications
+
+    python src/retrieval/spec_extractor.py
+
+AI/search part
+    python src/retrieval/search.py
+
+    Which products have battery backup?
+
+Requirement parser
+
+    python src/retrieval/requirement_parser.py
+
+    Which products have at least 4 hours of battery backup?
+
+Final product matching
+
+    python src/retrieval/product_matcher.py
+
+    Which products have at least 4 hours of battery backup?
+
+    python src/retrieval/product_matcher.py
+
+    Which products have a weight of at most 8 kg?
+
+
+
+
+
+    Semantic Search
+      +
+Requirement Parsing
+      +
+Specification Extraction
+      +
+Value Comparison
+      =
+Reliable Tender Matching
