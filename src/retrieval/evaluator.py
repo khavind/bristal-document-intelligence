@@ -1,5 +1,7 @@
-from value_parser import parse_value
-
+# from value_parser import parse_value
+# from unit_converter import convert
+from src.retrieval.value_parser import parse_value
+from src.retrieval.unit_converter import convert
 
 def evaluate_requirement(requirement, product_value_text):
     """
@@ -11,36 +13,61 @@ def evaluate_requirement(requirement, product_value_text):
         UNKNOWN
     """
 
-    # ---------------------------------------------------------
-    # 1. Validate requirement
-    # ---------------------------------------------------------
-
+    # Requirement must contain enough information to evaluate
     if requirement["value"] is None or requirement["operator"] is None:
         return "UNKNOWN"
 
-    # ---------------------------------------------------------
-    # 2. Parse product value
-    # ---------------------------------------------------------
-
     product_value = parse_value(product_value_text)
 
-    if product_value["type"] == "unknown":
+    # Cannot evaluate unavailable or unknown values
+    if product_value["type"] in ["unknown", "not_available"]:
         return "UNKNOWN"
-
-    # ---------------------------------------------------------
-    # 3. Check units
-    # ---------------------------------------------------------
 
     required_unit = requirement["unit"]
     product_unit = product_value.get("unit")
 
+    # ---------------------------------------------------------
+    # UNIT NORMALIZATION
+    # ---------------------------------------------------------
+
     if required_unit and product_unit:
 
-        if required_unit != product_unit:
+        try:
+            product_number = product_value.get("value")
+
+            if product_value["type"] == "scalar":
+                product_number = convert(
+                    product_number,
+                    product_unit,
+                    required_unit
+                )
+
+                product_value["value"] = product_number
+
+            elif product_value["type"] == "range":
+
+                product_value["min"] = convert(
+                    product_value["min"],
+                    product_unit,
+                    required_unit
+                )
+
+                product_value["max"] = convert(
+                    product_value["max"],
+                    product_unit,
+                    required_unit
+                )
+
+        except ValueError:
+            # Units are incompatible or unsupported
             return "UNKNOWN"
 
+    elif required_unit and not product_unit:
+        # Requirement specifies a unit but product does not
+        return "UNKNOWN"
+
     # ---------------------------------------------------------
-    # 4. Scalar value
+    # SCALAR
     # ---------------------------------------------------------
 
     if product_value["type"] == "scalar":
@@ -65,7 +92,7 @@ def evaluate_requirement(requirement, product_value_text):
             return "PASS" if product_number == required_number else "FAIL"
 
     # ---------------------------------------------------------
-    # 5. Boolean / capability value
+    # BOOLEAN
     # ---------------------------------------------------------
 
     if product_value["type"] == "boolean":
@@ -75,18 +102,16 @@ def evaluate_requirement(requirement, product_value_text):
 
         required_value = requirement["value"]
 
-        # Required capability
         if required_value == 1:
             return "PASS" if product_value["value"] is True else "FAIL"
 
-        # Explicitly not required / must not be supported
         elif required_value == 0:
             return "PASS" if product_value["value"] is False else "FAIL"
 
         return "UNKNOWN"
 
     # ---------------------------------------------------------
-    # 6. Range value
+    # RANGE
     # ---------------------------------------------------------
 
     if product_value["type"] == "range":
@@ -109,36 +134,4 @@ def evaluate_requirement(requirement, product_value_text):
         elif operator == "<":
             return "PASS" if minimum < required_number else "FAIL"
 
-    # ---------------------------------------------------------
-    # 7. Anything we don't understand
-    # ---------------------------------------------------------
-
     return "UNKNOWN"
-
-
-if __name__ == "__main__":
-
-    test_requirement = {
-        "attribute": "ECG Channels",
-        "operator": ">=",
-        "value": 5.0,
-        "unit": None,
-    }
-
-    test_values = [
-        "5",
-        "12",
-        "3"
-    ]
-
-    for product_value in test_values:
-
-        result = evaluate_requirement(
-            test_requirement,
-            product_value
-        )
-
-        print("Requirement : >= 5 ECG Channels")
-        print(f"Product     : {product_value}")
-        print(f"Result      : {result}")
-        print("-" * 50)
