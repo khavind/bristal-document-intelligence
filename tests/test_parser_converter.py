@@ -85,3 +85,45 @@ def test_parser_normalizes_spaced_and_compound_units():
     parsed = parse_value("10 to 40 °C")
     assert parsed["type"] == "range"
     assert parsed["unit"] == "°C"
+
+def test_two_dimension_value():
+    parsed = parse_value("372 mm x 311 mm")
+
+    assert parsed["type"] == "compound"
+    assert parsed["values"] == [372, 311]
+    assert parsed["unit"] == "mm"
+    assert parsed["separator"] == "x"
+
+
+def test_three_dimension_value():
+    parsed = parse_value("916 mm x 527 mm x 25 mm")
+
+    assert parsed["type"] == "compound"
+    assert parsed["values"] == [916, 527, 25]
+    assert parsed["unit"] == "mm"
+    assert parsed["separator"] == "x"
+
+
+def test_paired_angle_value():
+    parsed = parse_value("45°/45°")
+
+    assert parsed["type"] == "paired"
+    assert parsed["values"] == [45, 45]
+    assert parsed["unit"] == "°"
+    assert parsed["separator"] == "/"
+
+
+def test_paired_angle_values_with_spaces():
+    parsed = parse_value("30° / 30°")
+
+    assert parsed["type"] == "paired"
+    assert parsed["values"] == [30, 30]
+    assert parsed["unit"] == "°"
+    assert parsed["separator"] == "/"
+
+def test_multiple_values_with_slash():
+    parsed = parse_value("25/50 mm/sec")
+
+    assert parsed["type"] == "multiple"
+    assert parsed["values"] == [25, 50]
+    assert parsed["unit"] == "mm/sec"

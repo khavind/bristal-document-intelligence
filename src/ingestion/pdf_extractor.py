@@ -1,56 +1,50 @@
-import fitz
-import json
+import pymupdf
 from pathlib import Path
-
-from text_normalizer import normalize_text
-
-
-pdf_path = "data/raw/sample_product.pdf"
-output_path = "data/processed/sample_product.json"
+import json
 
 
-document = fitz.open(pdf_path)
+# Input and output folders
+RAW_DIR = Path("data/raw")
+PROCESSED_DIR = Path("data/processed")
 
-pages = []
-
-
-for page_number, page in enumerate(document, start=1):
-
-    # Extract raw text
-    raw_text = page.get_text()
-
-    # Normalize extracted text
-    cleaned_text = normalize_text(raw_text)
-
-    pages.append({
-        "page": page_number,
-        "text": cleaned_text
-    })
+# Create output folder if it doesn't exist
+PROCESSED_DIR.mkdir(parents=True, exist_ok=True)
 
 
-document.close()
+# Find all PDF files in data/raw
+pdf_files = list(RAW_DIR.glob("*.pdf"))
+
+if not pdf_files:
+    print("No PDF files found in data/raw/")
+    exit()
 
 
-output_data = {
-    "document": "sample_product.pdf",
-    "pages": pages
-}
+for pdf_path in pdf_files:
 
+    print(f"\nProcessing: {pdf_path.name}")
 
-Path("data/processed").mkdir(
-    parents=True,
-    exist_ok=True
-)
+    document = pymupdf.open(pdf_path)
 
+    pages = []
 
-with open(output_path, "w", encoding="utf-8") as file:
+    for page_number, page in enumerate(document, start=1):
 
-    json.dump(
-        output_data,
-        file,
-        indent=4,
-        ensure_ascii=False
-    )
+        text = page.get_text()
 
+        pages.append({
+            "page": page_number,
+            "text": text
+        })
 
-print(f"Extracted and normalized text saved to: {output_path}")
+    document.close()
+
+    # Create JSON filename from PDF filename
+    output_filename = pdf_path.stem + ".json"
+    output_path = PROCESSED_DIR / output_filename
+
+    with open(output_path, "w", encoding="utf-8") as file:
+        json.dump(pages, file, indent=4, ensure_ascii=False)
+
+    print(f"Saved: {output_path}")
+
+print("\nPDF extraction completed.")

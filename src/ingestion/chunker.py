@@ -2,158 +2,203 @@ import json
 from pathlib import Path
 
 
-input_path = "data/processed/sample_product.json"
-output_path = "data/processed/sample_product_chunks.json"
+# --------------------------------------------------
+# Directories
+# --------------------------------------------------
+
+PROCESSED_DIR = Path("data/processed")
 
 
-# Load extracted document
-with open(input_path, "r", encoding="utf-8") as file:
-    document_data = json.load(file)
+# --------------------------------------------------
+# Find normalized documents
+# --------------------------------------------------
+
+input_files = list(PROCESSED_DIR.glob("*_normalized.json"))
+
+if not input_files:
+    print("No normalized JSON files found.")
+    exit()
 
 
-chunks = []
+# --------------------------------------------------
+# Process each normalized document
+# --------------------------------------------------
 
-chunk_id = 1
+for input_path in input_files:
 
-current_product = None
-current_section = None
-current_page = None
-current_text = []
+    print(f"\nChunking: {input_path.name}")
 
+    # Load normalized document
+    with open(input_path, "r", encoding="utf-8") as file:
+        pages = json.load(file)
 
-product_headers = [
-    "Product 1:",
-    "Product 2:",
-    "Product 3:",
-    "Product 4:"
-]
+    chunks = []
 
+    chunk_id = 1
 
-section_headers = [
-    "Technical Specifications",
-    "Features"
-]
-
-
-global_sections = [
-    "Compliance & Documentation",
-    "Documentation Available",
-    "Example Certifications",
-    "Sample Tender Requirement",
-    "Evaluation Goal"
-]
-
-
-def save_chunk():
-    global chunk_id, current_text
-
-    if not current_text:
-        return
-
-    # Remove empty lines
-    cleaned_lines = [
-        line.strip()
-        for line in current_text
-        if line.strip()
-    ]
-
-    if not cleaned_lines:
-        current_text = []
-        return
-
-    chunks.append({
-        "chunk_id": f"chunk_{chunk_id}",
-        "document": document_data["document"],
-        "page": current_page,
-        "product": current_product,
-        "section": current_section,
-        "text": "\n".join(cleaned_lines)
-    })
-
-    chunk_id += 1
+    current_product = None
+    current_section = None
+    current_page = None
     current_text = []
 
 
-# Process every page
-for page in document_data["pages"]:
+    # --------------------------------------------------
+    # Save current chunk
+    # --------------------------------------------------
 
-    current_page = page["page"]
+    def save_chunk():
 
-    lines = page["text"].splitlines()
+        nonlocal_values = None
 
-    for line in lines:
+        if not current_text:
+            return
 
-        line = line.strip()
+        cleaned_lines = [
+            line.strip()
+            for line in current_text
+            if line.strip()
+        ]
 
-        if not line:
-            continue
+        if not cleaned_lines:
+            return
 
-        # -----------------------------
-        # Product heading
-        # -----------------------------
-        if any(line.startswith(header) for header in product_headers):
+        chunks.append({
+            "chunk_id": f"chunk_{chunk_id}",
+            "document": input_path.stem.replace("_normalized", ""),
+            "page": current_page,
+            "product": current_product,
+            "section": current_section,
+            "text": "\n".join(cleaned_lines)
+        })
 
-            save_chunk()
 
-            current_product = line
-            current_section = "Product Overview"
+    # --------------------------------------------------
+    # Process every page
+    # --------------------------------------------------
+
+    for page in pages:
+
+        current_page = page["page"]
+
+        lines = page["text"].splitlines()
+
+        for line in lines:
+
+            line = line.strip()
+
+            if not line:
+                continue
+
+
+            # --------------------------------------------------
+            # Product identification
+            # --------------------------------------------------
+
+            if "HILLROM 900 ACCELLA BED" in line.upper():
+
+                if current_text:
+                    save_chunk()
+                    chunk_id += 1
+                    current_text = []
+
+                current_product = "Hillrom 900 Accella Bed"
+                current_section = "Product Overview"
+
+                current_text.append(line)
+
+                continue
+
+
+            # --------------------------------------------------
+            # Major section headings
+            # --------------------------------------------------
+
+            if line in [
+                "TECHNICAL SPECIFICATIONS",
+                "Technical Specifications",
+                "ADDITIONAL STANDARD FEATURES FOR ALL CONFIGURATIONS"
+            ]:
+
+                if current_text:
+                    save_chunk()
+                    chunk_id += 1
+                    current_text = []
+
+                current_section = line
+
+                current_text.append(line)
+
+                continue
+
+
+            # --------------------------------------------------
+            # Nested specification section
+            # --------------------------------------------------
+
+            if line in [
+                "Bed angles",
+                "Sleep deck",
+                "Controls"
+            ]:
+
+                if current_text:
+                    save_chunk()
+                    chunk_id += 1
+                    current_text = []
+
+                current_section = line
+
+                current_text.append(line)
+
+                continue
+
+
+            # --------------------------------------------------
+            # Normal content
+            # --------------------------------------------------
 
             current_text.append(line)
 
-        # -----------------------------
-        # Product-specific sections
-        # -----------------------------
-        elif line in section_headers:
 
-            save_chunk()
+    # --------------------------------------------------
+    # Save final chunk
+    # --------------------------------------------------
 
-            current_section = line
-
-            current_text.append(line)
-
-        # -----------------------------
-        # Global document sections
-        # -----------------------------
-        elif line in global_sections:
-
-            save_chunk()
-
-            current_product = None
-            current_section = line
-
-            # Do not immediately create a heading-only chunk.
-            # The actual content following the heading will be stored.
-
-        # -----------------------------
-        # Normal content
-        # -----------------------------
-        else:
-
-            current_text.append(line)
+    if current_text:
+        save_chunk()
 
 
-# Save final chunk
-save_chunk()
+    # --------------------------------------------------
+    # Output path
+    # --------------------------------------------------
 
-
-# Create output directory if required
-Path("data/processed").mkdir(parents=True, exist_ok=True)
-
-
-# Save chunks
-output_data = {
-    "chunks": chunks
-}
-
-
-with open(output_path, "w", encoding="utf-8") as file:
-    json.dump(
-        output_data,
-        file,
-        indent=4,
-        ensure_ascii=False
+    output_path = (
+        PROCESSED_DIR /
+        f"{input_path.stem.replace('_normalized', '')}_chunks.json"
     )
 
 
-print(f"Created {len(chunks)} chunks.")
-print(f"Chunks saved to: {output_path}")
+    # --------------------------------------------------
+    # Save chunks
+    # --------------------------------------------------
+
+    output_data = {
+        "chunks": chunks
+    }
+
+
+    with open(output_path, "w", encoding="utf-8") as file:
+
+        json.dump(
+            output_data,
+            file,
+            indent=4,
+            ensure_ascii=False
+        )
+
+
+    print(f"Created {len(chunks)} chunks.")
+    print(f"Chunks saved to: {output_path}")
+
+
+print("\nChunking completed.")
