@@ -1,6 +1,8 @@
 import json
 from pathlib import Path
 
+from value_parser import parse_value
+
 
 # --------------------------------------------------
 # File paths
@@ -43,47 +45,64 @@ structured_products = []
 
 for chunk in spec_chunks:
 
-    # Split chunk text into individual lines
     lines = [
         line.strip()
         for line in chunk["text"].splitlines()
         if line.strip()
     ]
 
-    # Remove table headings:
+    # Current synthetic PDF contains:
     #
     # Technical Specifications
     # Specification
     # Value
     #
+    # We still use this assumption for the current dataset.
     lines = lines[3:]
 
     specifications = []
 
-    # Specifications and values appear in pairs:
-    #
-    # Flow Rate
-    # 1–1000 ml/hr
-    #
-    # Flow Rate Accuracy
-    # ±3%
-    #
-    for i in range(0, len(lines), 2):
+    for i in range(0, len(lines) - 1, 2):
 
         attribute = lines[i]
-        value = lines[i + 1]
+        raw_value = lines[i + 1]
+
+        parsed_value = parse_value(raw_value)
+
+        # Detect standard / optional markers
+        status = None
+
+        if raw_value in ["•", "º"]:
+            if raw_value == "•":
+                status = "standard"
+            elif raw_value == "º":
+                status = "optional"
 
         specifications.append({
             "attribute": attribute,
-            "value": value
+            "raw_value": raw_value,
+            "parsed_value": parsed_value,
+            "status": status,
+            "source": {
+                "document": chunk["document"],
+                "page": chunk["page"],
+                "chunk_id": chunk["chunk_id"]
+            }
         })
 
-    # Store product-level information
+    # --------------------------------------------------
+    # Product identity
+    # --------------------------------------------------
+
+    product_name = chunk["product"]
+
     structured_products.append({
-        "product": chunk["product"],
-        "page": chunk["page"],
-        "chunk_id": chunk["chunk_id"],
-        "specifications": specifications
+        "product_family": product_name,
+        "model": None,
+        "variant": None,
+        "configuration": None,
+        "specifications": specifications,
+        "relationships": []
     })
 
 
@@ -96,14 +115,15 @@ output_data = {
 }
 
 
-# Make sure processed folder exists
+# --------------------------------------------------
+# Save structured specifications
+# --------------------------------------------------
+
 Path("data/processed").mkdir(
     parents=True,
     exist_ok=True
 )
 
-
-# Save structured specifications
 with open(output_path, "w", encoding="utf-8") as file:
     json.dump(
         output_data,
@@ -121,18 +141,19 @@ print("\n--- Structured Specifications ---\n")
 
 for product in structured_products:
 
-    print(f"Product: {product['product']}")
-    print(f"Page: {product['page']}")
+    print(f"Product Family: {product['product_family']}")
+    print(f"Model: {product['model']}")
 
     for specification in product["specifications"]:
 
         print(
             f"{specification['attribute']} "
-            f"→ {specification['value']}"
+            f"→ {specification['raw_value']} "
+            f"→ {specification['parsed_value']}"
         )
 
     print("-" * 60)
 
 
-print(f"\nStructured specifications saved to:")
+print("\nStructured specifications saved to:")
 print(output_path)

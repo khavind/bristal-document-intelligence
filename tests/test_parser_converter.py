@@ -70,3 +70,18 @@ def test_unit_alias_from_parser():
     )
 
     assert converted == pytest.approx(4000000)
+
+
+def test_parser_normalizes_spaced_and_compound_units():
+
+    parsed = parse_value("1-1000 ml / hr")
+    assert parsed["type"] == "range"
+    assert parsed["unit"] == "ml/hr"
+
+    parsed = parse_value("500 Samples / Sec")
+    assert parsed["type"] == "scalar"
+    assert parsed["unit"] == "samples/sec"
+
+    parsed = parse_value("10 to 40 °C")
+    assert parsed["type"] == "range"
+    assert parsed["unit"] == "°C"

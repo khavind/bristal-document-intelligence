@@ -7,10 +7,18 @@ def normalize_unit(unit):
     into one standard form.
     """
 
+    if unit is None:
+        return None
+
+    unit = str(unit).strip()
+
     if not unit:
         return None
 
-    unit = unit.strip().lower()
+    unit = unit.replace("º", "°")
+    unit = re.sub(r"\s*/\s*", "/", unit)
+    unit = re.sub(r"\s+", " ", unit)
+    unit = unit.lower()
 
     unit_aliases = {
         # Time
@@ -53,12 +61,11 @@ def normalize_unit(unit):
 
         "ml/hr": "ml/hr",
         "ml/h": "ml/hr",
-
         "l/min": "L/min",
         "l/m": "L/min",
-
         "samples/sec": "samples/sec",
         "sample/sec": "samples/sec",
+        "sample/s": "samples/sec",
 
         # Percentage
         "%": "%",
@@ -66,7 +73,8 @@ def normalize_unit(unit):
 
         # Temperature
         "°c": "°C",
-        "c": "°C"
+        "c": "°C",
+        "celsius": "°C"
     }
 
     return unit_aliases.get(unit, unit)
