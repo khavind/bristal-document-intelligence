@@ -1,204 +1,266 @@
 import json
+import re
 from pathlib import Path
 
 
-# --------------------------------------------------
-# Directories
-# --------------------------------------------------
-
 PROCESSED_DIR = Path("data/processed")
 
+# Target size for a normal chunk.
+# This is not a hard limit; we split at natural line boundaries.
+TARGET_CHUNK_CHARS = 1500
 
-# --------------------------------------------------
-# Find normalized documents
-# --------------------------------------------------
-
-input_files = list(PROCESSED_DIR.glob("*_normalized.json"))
-
-if not input_files:
-    print("No normalized JSON files found.")
-    exit()
+# Absolute maximum size before we force a split.
+MAX_CHUNK_CHARS = 2200
 
 
-# --------------------------------------------------
-# Process each normalized document
-# --------------------------------------------------
+def looks_like_heading(line):
+    """
+    Conservatively identify lines that may represent headings.
 
-for input_path in input_files:
+    We do NOT treat every short/title-case line as a heading.
+    """
 
-    print(f"\nChunking: {input_path.name}")
+    line = line.strip()
 
-    # Load normalized document
-    with open(input_path, "r", encoding="utf-8") as file:
-        pages = json.load(file)
+    if not line:
+        return False
+
+    # Very short lines are usually labels, values, addresses, etc.
+    if len(line) < 8:
+        return False
+
+    # Avoid treating long sentences as headings.
+    if len(line) > 100:
+        return False
+
+    # Avoid obvious address/contact lines.
+    if re.search(r"\d{3,}", line):
+        return False
+
+    # Strong signal: uppercase heading.
+    letters = [c for c in line if c.isalpha()]
+
+    if letters:
+        uppercase_ratio = sum(c.isupper() for c in letters) / len(letters)
+
+        if uppercase_ratio > 0.75 and len(line.split()) <= 12:
+            return True
+
+    # Another useful signal: title-style heading.
+    words = line.split()
+
+    if 1 <= len(words) <= 8:
+        capitalized_words = sum(
+            1 for word in words
+            if word[:1].isupper()
+        )
+
+        if capitalized_words / len(words) >= 0.75:
+            return True
+
+    return False
+
+
+def save_chunk(chunks, chunk_id, document, page, section, lines):
+    """
+    Save one chunk if it contains meaningful text.
+    """
+
+    cleaned_lines = [
+        line.strip()
+        for line in lines
+        if line.strip()
+    ]
+
+    if not cleaned_lines:
+        return chunk_id
+
+    chunks.append({
+        "chunk_id": f"chunk_{chunk_id}",
+        "document": document,
+        "page": page,
+        "product": None,
+        "section": section,
+        "text": "\n".join(cleaned_lines)
+    })
+
+    return chunk_id + 1
+
+
+def chunk_page(page_number, page_text, document, chunk_id):
+    """
+    Chunk one PDF page.
+
+    Important:
+    - Chunks never cross page boundaries.
+    - We accumulate lines instead of creating a chunk for every heading.
+    - Large pages are split by character size.
+    """
 
     chunks = []
 
-    chunk_id = 1
+    lines = [
+        line.strip()
+        for line in page_text.splitlines()
+        if line.strip()
+    ]
 
-    current_product = None
+    if not lines:
+        return chunks, chunk_id
+
+    current_lines = []
     current_section = None
-    current_page = None
-    current_text = []
+
+    for line in lines:
+
+        # If this looks like a heading, remember it as metadata.
+        # We do NOT immediately create a new chunk.
+        if looks_like_heading(line):
+            current_section = line
+
+        current_lines.append(line)
+
+        current_text = "\n".join(current_lines)
+
+        # Normal split point.
+        if len(current_text) >= TARGET_CHUNK_CHARS:
+
+            chunk_id = save_chunk(
+                chunks,
+                chunk_id,
+                document,
+                page_number,
+                current_section,
+                current_lines
+            )
+
+            current_lines = []
+
+        # Safety split.
+        elif len(current_text) >= MAX_CHUNK_CHARS:
+
+            chunk_id = save_chunk(
+                chunks,
+                chunk_id,
+                document,
+                page_number,
+                current_section,
+                current_lines
+            )
+
+            current_lines = []
+
+    # Save remaining text from the page.
+    if current_lines:
+
+        chunk_id = save_chunk(
+            chunks,
+            chunk_id,
+            document,
+            page_number,
+            current_section,
+            current_lines
+        )
+
+    return chunks, chunk_id
 
 
-    # --------------------------------------------------
-    # Save current chunk
-    # --------------------------------------------------
+def chunk_document(pages, document_name):
+    """
+    Convert normalized PDF pages into manageable chunks.
 
-    def save_chunk():
+    Generic design:
+    - Works page by page.
+    - Does not depend on specific PDF names.
+    - Does not hard-code document-specific headings.
+    - Preserves page provenance.
+    """
 
-        nonlocal_values = None
-
-        if not current_text:
-            return
-
-        cleaned_lines = [
-            line.strip()
-            for line in current_text
-            if line.strip()
-        ]
-
-        if not cleaned_lines:
-            return
-
-        chunks.append({
-            "chunk_id": f"chunk_{chunk_id}",
-            "document": input_path.stem.replace("_normalized", ""),
-            "page": current_page,
-            "product": current_product,
-            "section": current_section,
-            "text": "\n".join(cleaned_lines)
-        })
-
-
-    # --------------------------------------------------
-    # Process every page
-    # --------------------------------------------------
+    chunks = []
+    chunk_id = 1
 
     for page in pages:
 
-        current_page = page["page"]
+        page_number = page["page"]
+        page_text = page.get("text", "")
 
-        lines = page["text"].splitlines()
+        page_chunks, chunk_id = chunk_page(
+            page_number,
+            page_text,
+            document_name,
+            chunk_id
+        )
 
-        for line in lines:
+        chunks.extend(page_chunks)
 
-            line = line.strip()
-
-            if not line:
-                continue
-
-
-            # --------------------------------------------------
-            # Product identification
-            # --------------------------------------------------
-
-            if "HILLROM 900 ACCELLA BED" in line.upper():
-
-                if current_text:
-                    save_chunk()
-                    chunk_id += 1
-                    current_text = []
-
-                current_product = "Hillrom 900 Accella Bed"
-                current_section = "Product Overview"
-
-                current_text.append(line)
-
-                continue
-
-
-            # --------------------------------------------------
-            # Major section headings
-            # --------------------------------------------------
-
-            if line in [
-                "TECHNICAL SPECIFICATIONS",
-                "Technical Specifications",
-                "ADDITIONAL STANDARD FEATURES FOR ALL CONFIGURATIONS"
-            ]:
-
-                if current_text:
-                    save_chunk()
-                    chunk_id += 1
-                    current_text = []
-
-                current_section = line
-
-                current_text.append(line)
-
-                continue
-
-
-            # --------------------------------------------------
-            # Nested specification section
-            # --------------------------------------------------
-
-            if line in [
-                "Bed angles",
-                "Sleep deck",
-                "Controls"
-            ]:
-
-                if current_text:
-                    save_chunk()
-                    chunk_id += 1
-                    current_text = []
-
-                current_section = line
-
-                current_text.append(line)
-
-                continue
-
-
-            # --------------------------------------------------
-            # Normal content
-            # --------------------------------------------------
-
-            current_text.append(line)
-
-
-    # --------------------------------------------------
-    # Save final chunk
-    # --------------------------------------------------
-
-    if current_text:
-        save_chunk()
-
-
-    # --------------------------------------------------
-    # Output path
-    # --------------------------------------------------
-
-    output_path = (
-        PROCESSED_DIR /
-        f"{input_path.stem.replace('_normalized', '')}_chunks.json"
-    )
-
-
-    # --------------------------------------------------
-    # Save chunks
-    # --------------------------------------------------
-
-    output_data = {
+    return {
         "chunks": chunks
     }
 
 
-    with open(output_path, "w", encoding="utf-8") as file:
+def process_all_documents():
+    """
+    Process every normalized JSON document in data/processed/.
+    """
 
-        json.dump(
-            output_data,
-            file,
-            indent=4,
-            ensure_ascii=False
+    input_files = list(
+        PROCESSED_DIR.glob("*_normalized.json")
+    )
+
+    if not input_files:
+        print("No normalized JSON files found.")
+        return
+
+    for input_path in input_files:
+
+        print(f"\nChunking: {input_path.name}")
+
+        with open(
+            input_path,
+            "r",
+            encoding="utf-8"
+        ) as file:
+
+            pages = json.load(file)
+
+        document_name = input_path.stem.replace(
+            "_normalized",
+            ""
         )
 
+        result = chunk_document(
+            pages,
+            document_name
+        )
 
-    print(f"Created {len(chunks)} chunks.")
-    print(f"Chunks saved to: {output_path}")
+        output_path = (
+            PROCESSED_DIR /
+            f"{document_name}_chunks.json"
+        )
+
+        with open(
+            output_path,
+            "w",
+            encoding="utf-8"
+        ) as file:
+
+            json.dump(
+                result,
+                file,
+                indent=4,
+                ensure_ascii=False
+            )
+
+        print(
+            f"Created {len(result['chunks'])} chunks."
+        )
+
+        print(
+            f"Chunks saved to: {output_path}"
+        )
+
+    print("\nChunking completed.")
 
 
-print("\nChunking completed.")
+if __name__ == "__main__":
+    process_all_documents()
