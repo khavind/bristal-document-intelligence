@@ -61,7 +61,7 @@ def looks_like_heading(line):
     return False
 
 
-def save_chunk(chunks, chunk_id, document, page, section, lines):
+def save_chunk(chunks, chunk_id, document, page, section, lines, layout=None):
     """
     Save one chunk if it contains meaningful text.
     """
@@ -75,19 +75,24 @@ def save_chunk(chunks, chunk_id, document, page, section, lines):
     if not cleaned_lines:
         return chunk_id
 
-    chunks.append({
+    chunk = {
         "chunk_id": f"chunk_{chunk_id}",
         "document": document,
         "page": page,
         "product": None,
         "section": section,
-        "text": "\n".join(cleaned_lines)
-    })
+        "text": "\n".join(cleaned_lines),
+    }
+
+    if layout is not None:
+        chunk["layout"] = layout
+
+    chunks.append(chunk)
 
     return chunk_id + 1
 
 
-def chunk_page(page_number, page_text, document, chunk_id):
+def chunk_page(page_number, page_text, document, chunk_id, page_data=None):
     """
     Chunk one PDF page.
 
@@ -110,6 +115,14 @@ def chunk_page(page_number, page_text, document, chunk_id):
 
     current_lines = []
     current_section = None
+    layout = None
+
+    if isinstance(page_data, dict):
+        layout = {
+            "page_width": page_data.get("width") or page_data.get("page_width"),
+            "page_height": page_data.get("height") or page_data.get("page_height"),
+            "blocks": page_data.get("blocks", []),
+        }
 
     for line in lines:
 
@@ -131,7 +144,8 @@ def chunk_page(page_number, page_text, document, chunk_id):
                 document,
                 page_number,
                 current_section,
-                current_lines
+                current_lines,
+                layout=layout,
             )
 
             current_lines = []
@@ -145,7 +159,8 @@ def chunk_page(page_number, page_text, document, chunk_id):
                 document,
                 page_number,
                 current_section,
-                current_lines
+                current_lines,
+                layout=layout,
             )
 
             current_lines = []
@@ -159,7 +174,8 @@ def chunk_page(page_number, page_text, document, chunk_id):
             document,
             page_number,
             current_section,
-            current_lines
+            current_lines,
+            layout=layout,
         )
 
     return chunks, chunk_id
@@ -188,7 +204,8 @@ def chunk_document(pages, document_name):
             page_number,
             page_text,
             document_name,
-            chunk_id
+            chunk_id,
+            page,
         )
 
         chunks.extend(page_chunks)

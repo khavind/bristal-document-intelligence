@@ -29,11 +29,26 @@ for pdf_path in pdf_files:
 
     for page_number, page in enumerate(document, start=1):
 
+        # Existing plain text extraction
         text = page.get_text()
+
+        # Layout-aware block extraction
+        blocks = page.get_text("blocks")
+
+        page_blocks = []
+
+        for block in blocks:
+            x0, y0, x1, y1, block_text = block[:5]
+
+            page_blocks.append({
+                "bbox": [x0, y0, x1, y1],
+                "text": block_text.strip()
+            })
 
         pages.append({
             "page": page_number,
-            "text": text
+            "text": text,
+            "blocks": page_blocks
         })
 
     document.close()
