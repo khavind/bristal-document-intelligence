@@ -20,7 +20,9 @@ UNIT_CONVERSIONS = {
     # Base unit: kilograms
     "weight": {
         "g": 0.001,
-        "kg": 1
+        "kg": 1,
+        "lb": 0.45359237,
+        "lbs": 0.45359237
     },
 
     # Base unit: meters
@@ -28,7 +30,34 @@ UNIT_CONVERSIONS = {
         "mm": 0.001,
         "cm": 0.01,
         "m": 1,
-        "inch": 0.0254
+        "inch": 0.0254,
+        "in": 0.0254
+    },
+
+    # Base unit: volts
+    "electrical": {
+        "mv": 0.001,
+        "v": 1,
+        "kv": 1000
+    },
+
+    # Base unit: hertz
+    "frequency": {
+        "hz": 1,
+        "khz": 1000,
+        "mhz": 1000000,
+        "ghz": 1000000000
+    },
+
+    # These units are comparable only to the same measurement kind.
+    "angle": {
+        "°": 1
+    },
+    "heart_rate": {
+        "bpm": 1
+    },
+    "sample_rate": {
+        "samples/sec": 1
     }
 }
 
@@ -59,6 +88,10 @@ UNIT_ALIASES = {
     "kgs": "kg",
     "kilogram": "kg",
     "kilograms": "kg",
+    "lb": "lb",
+    "lbs": "lb",
+    "pound": "lb",
+    "pounds": "lb",
 
     # Length
     "mm": "mm",
@@ -75,7 +108,37 @@ UNIT_ALIASES = {
 
     "inch": "inch",
     "inches": "inch",
-    "in": "inch"
+    "in": "inch",
+
+    # Electrical
+    "v": "v",
+    "volt": "v",
+    "volts": "v",
+    "mv": "mv",
+    "millivolt": "mv",
+    "millivolts": "mv",
+    "kv": "kv",
+    "kilovolt": "kv",
+    "kilovolts": "kv",
+
+    # Frequency
+    "hz": "hz",
+    "hertz": "hz",
+    "khz": "khz",
+    "kilohertz": "khz",
+    "mhz": "mhz",
+    "megahertz": "mhz",
+    "ghz": "ghz",
+    "gigahertz": "ghz",
+    "sample/sec": "samples/sec",
+    "sample/s": "samples/sec",
+    "samples/s": "samples/sec",
+
+    # Angle
+    "°": "°",
+    "deg": "°",
+    "degree": "°",
+    "degrees": "°"
 }
 
 

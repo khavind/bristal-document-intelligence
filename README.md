@@ -36,6 +36,61 @@ The goal of **Bristal Healthcare Intelligence** is to build an intelligent syste
 
 # 🧠 Current Architecture
 
+The query layer produces a validated local query plan and routes supported
+queries into `PRODUCT_PRESENCE`, `PRODUCT_COUNT`, `FEATURE_EXISTENCE`,
+`INVENTORY_COUNT`, `NUMERIC_SPECIFICATION`, or `DOCUMENT_RETRIEVAL`.
+Unsupported or ambiguous questions abstain. Catalogue counts represent
+distinct identities found in processed documents, not stock counts. Inventory
+queries return `UNKNOWN` until a trusted inventory source is connected.
+
+The runtime corpus index is built from processed chunk and specification
+records. It keeps source passages, document/page/section/chunk references,
+extracted raw values, normalized values, and inferred metadata evidence
+together. Product identity and document type are inferred from content and
+existing metadata; uncertain identity is not counted as a known model.
+`match_requirement()` preserves its existing result keys and adds a common
+envelope (`question`, `intent`, `query_plan`, `execution_status`,
+`compliance_status`, `sources`, `missing_information`, and `validation`).
+
+General document questions use local lexical passage ranking. Retrieved
+passages are evidence candidates, not proof and not a generated summary;
+embeddings are not part of the runtime search path. The optional
+`embed_chunks()` adapter requires a caller-supplied encoder and corpus and
+selects no model or dependency. Compound numeric queries support uniformly
+`AND` or `OR` conditions with tri-state combination. Scalar `maximum`,
+`minimum`, `average`, and `sum` aggregations are supported across indexed
+products when every identified model has a comparable value. A numeric
+threshold without an explicit attribute is not matched to a convenient
+candidate attribute.
+
+Numeric filtering evaluates every reliably indexed product in the requested
+category and returns product-scoped `PASS`, `FAIL`, or `UNKNOWN` rows.
+Missing attributes remain `UNKNOWN`; unrelated attributes (for example,
+product weight instead of safe working load) are not substituted. Product
+comparisons resolve each named identity and compare only the requested
+attribute. Product summaries are deterministic lists of extracted facts and
+retrieved passages, with source locations and explicit standard/optional
+labels only when the extractor recorded them. Natural-language document
+questions return at most three ranked passages by default; `search_documents`
+defaults to five and accepts a configurable `limit`. Retrieval favors
+explanatory passages for named features.
+
+This is a deterministic local fallback, not universal natural-language
+understanding. It does not yet provide LLM-based answer composition, robust
+coreference resolution, time-aware operational facts, arbitrary grouped
+aggregations, or a source-authority policy for resolving contradictions.
+Aggregations over an incomplete or conflicting fact set abstain. A lexical
+match alone cannot answer questions whose wording has no sufficiently
+relevant source passage.
+The current processed Affinity specification labels `480 lbs (218 kg)` as
+`Bed weight`, not safe working load. The matcher intentionally treats that
+fact as unrelated to a safe-working-load requirement; it reports `UNKNOWN`
+for that product until source-backed safe-working-load evidence is extracted.
+The same source page lists a `Maximum Lift Capacity` section with `Bed` and
+`Foot section` values, but the current extractor pairs the parent label with
+`Bed` and misses the numeric table values. This extraction limitation is also
+left visible rather than being used as a safe-working-load substitute.
+
 The current prototype follows a modular pipeline:
 
 ```text

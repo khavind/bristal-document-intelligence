@@ -1,4 +1,4 @@
-from src.retrieval.spec_extractor import is_valid_attribute_value_pair
+from src.retrieval.spec_extractor import create_source, is_valid_attribute_value_pair
 from src.retrieval.value_parser import parse_value
 
 
@@ -71,13 +71,18 @@ def test_rejects_prose_fragment():
 
 
 def test_provenance_remains_correct():
-    chunk = {"document": "doc-1", "page": 9, "chunk_id": "chunk_42"}
-    spec = {
-        "attribute": "Height",
-        "raw_value": "510 mm to 1,060 mm",
-        "parsed_value": parse_value("510 mm to 1,060 mm"),
-        "source": {"document": "doc-1", "page": 9, "chunk_id": "chunk_42"},
+    chunk = {
+        "document": "doc-1",
+        "page": 9,
+        "section": "Dimensions",
+        "chunk_id": "chunk_42",
+        "text": "Height\n510 mm to 1,060 mm",
     }
-    assert spec["source"]["document"] == "doc-1"
-    assert spec["source"]["page"] == 9
-    assert spec["source"]["chunk_id"] == "chunk_42"
+    source = create_source(chunk)
+    assert source == {
+        "document": "doc-1",
+        "page": 9,
+        "section": "Dimensions",
+        "chunk_id": "chunk_42",
+        "evidence": "Height\n510 mm to 1,060 mm",
+    }

@@ -1,65 +1,22 @@
-import json
-from pathlib import Path
-
-from sentence_transformers import SentenceTransformer
+"""Optional adapter for callers that already provide a compatible encoder."""
 
 
-input_path = "data/processed/sample_product_chunks.json"
-output_path = "data/processed/sample_product_embeddings.json"
+def embed_chunks(chunks, encoder):
+    """Return copied chunks with encoder vectors; this module selects no model or corpus."""
+    if not hasattr(encoder, "encode") or not callable(encoder.encode):
+        raise TypeError("encoder must provide a callable encode(texts) method.")
 
+    chunk_records = [dict(chunk) for chunk in chunks]
+    texts = [str(chunk.get("text") or "") for chunk in chunk_records]
+    if not texts:
+        return {"chunks": chunk_records}
 
-# Load the embedding model
-model = SentenceTransformer("all-MiniLM-L6-v2")
+    embeddings = encoder.encode(texts)
+    if len(embeddings) != len(chunk_records):
+        raise ValueError("Encoder output count does not match the number of chunks.")
 
-
-# Load chunks
-with open(input_path, "r", encoding="utf-8") as file:
-    data = json.load(file)
-
-
-chunks = data["chunks"]
-
-
-# Extract text from each chunk
-texts = [
-    chunk["text"]
-    for chunk in chunks
-]
-
-
-# Generate embeddings
-embeddings = model.encode(texts)
-
-
-# Add embedding to each chunk
-for chunk, embedding in zip(chunks, embeddings):
-
-    chunk["embedding"] = embedding.tolist()
-
-
-# Save chunks + embeddings
-output_data = {
-    "chunks": chunks
-}
-
-
-Path("data/processed").mkdir(
-    parents=True,
-    exist_ok=True
-)
-
-
-with open(output_path, "w", encoding="utf-8") as file:
-
-    json.dump(
-        output_data,
-        file,
-        indent=4,
-        ensure_ascii=False
-    )
-
-
-print(f"Total chunks: {len(chunks)}")
-print(f"Total embeddings: {len(embeddings)}")
-print(f"Embedding dimensions: {len(embeddings[0])}")
-print(f"Embeddings saved to: {output_path}")
+    for chunk, embedding in zip(chunk_records, embeddings):
+        chunk["embedding"] = (
+            embedding.tolist() if hasattr(embedding, "tolist") else list(embedding)
+        )
+    return {"chunks": chunk_records}

@@ -1,76 +1,61 @@
+"""Reusable lexical search over the processed document corpus."""
+
 import json
 
-from sentence_transformers import SentenceTransformer
-from sklearn.metrics.pairwise import cosine_similarity
+from src.retrieval.document_retrieval import retrieve_passages
+from src.retrieval.product_matcher import _catalogue_records, _load_processed_chunks
 
 
-input_path = "data/processed/sample_product_embeddings.json"
+def search_documents(query, *, product=None, document=None, limit=5):
+    """Return relevant passages, optionally restricted to an indexed product/document."""
+    records = _catalogue_records()
+    entity_refs = ()
+    if product:
+        matches = tuple(
+            record["product"]
+            for record in records
+            if record.get("product")
+            and record["product"].casefold() == product.casefold()
+        )
+        if not matches:
+            return []
+        entity_refs = matches
+    chunks = _load_processed_chunks()
+    if document:
+        chunks = [chunk for chunk in chunks if chunk.get("document") == document]
+        if not chunks:
+            return []
+    return retrieve_passages(
+        query,
+        chunks,
+        catalogue_records=records,
+        entity_refs=entity_refs,
+        limit=limit,
+    )
 
 
-# Load embedding model
-model = SentenceTransformer("all-MiniLM-L6-v2")
+def main():
+    query = input("Enter a document question: ").strip()
+    results = search_documents(query)
+    if not results:
+        print("No sufficiently relevant source passages were found.")
+        return
+    for result in results:
+        print(
+            json.dumps(
+                {
+                    "score": result["score"],
+                    "document": result["document"],
+                    "page": result["page"],
+                    "section": result["section"],
+                    "chunk_id": result["chunk_id"],
+                    "evidence": result["evidence"],
+                },
+                ensure_ascii=False,
+                indent=2,
+            )
+        )
 
 
-# Load chunks and embeddings
-with open(input_path, "r", encoding="utf-8") as file:
-    data = json.load(file)
-
-
-chunks = data["chunks"]
-
-
-# Ask the user for a search query
-query = input("Enter your question: ")
-
-
-# Convert question into an embedding
-query_embedding = model.encode([query])
-
-
-# Extract stored embeddings
-chunk_embeddings = [
-    chunk["embedding"]
-    for chunk in chunks
-]
-
-
-# Calculate similarity
-similarities = cosine_similarity(
-    query_embedding,
-    chunk_embeddings
-)[0]
-
-
-# Attach similarity score to each chunk
-results = []
-
-for chunk, score in zip(chunks, similarities):
-
-    results.append({
-        "chunk": chunk,
-        "score": float(score)
-    })
-
-
-# Sort by highest similarity
-results.sort(
-    key=lambda item: item["score"],
-    reverse=True
-)
-
-
-# Display top 3 results
-print("\n--- Top Results ---\n")
-
-
-for result in results[:3]:
-
-    chunk = result["chunk"]
-    score = result["score"]
-
-    print(f"Score: {score:.4f}")
-    print(f"Product: {chunk['product']}")
-    print(f"Page: {chunk['page']}")
-    print(f"Section: {chunk['section']}")
-    print(f"Text:\n{chunk['text']}")
-    print("-" * 60)
+if __name__ == "__main__":
+    main()

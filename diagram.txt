@@ -70,3 +70,114 @@ Specification Extraction
 Value Comparison
       =
 Reliable Tender Matching
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+                    BRISTAL DOCUMENTS
+                           │
+              ┌────────────┴────────────┐
+              │                         │
+              ▼                         ▼
+       PRODUCT DOCUMENTS         TENDER / RFP
+              │                         │
+              ▼                         ▼
+       PDF Extraction            Requirement Extraction
+              │                         │
+              ▼                         ▼
+       Text + Layout              Structured Requirements
+              │                         │
+              ▼                         │
+       Normalization                 │
+              │                      │
+              ▼                      │
+          Chunking                    │
+              │                      │
+              ▼                      │
+    Specification Extraction          │
+              │                      │
+              ▼                      │
+      Layout Validation               │
+              │                      │
+              ▼                      │
+    Structured Specifications         │
+              │                      │
+              └──────────┬───────────┘
+                         ▼
+                 PRODUCT MATCHING
+                         │
+                         ▼
+              REQUIREMENT COMPARISON
+                         │
+                 ┌───────┼───────┐
+                 ▼       ▼       ▼
+               PASS    FAIL   UNKNOWN
+                 │       │       │
+                 └───────┼───────┘
+                         ▼
+                SOURCE / PAGE EVIDENCE
+                         │
+                         ▼
+              HUMAN REVIEW / DECISION
+
+
+
+
+            attribute = ?
+            operator = ?
+            value = ?
+            unit = ?
+
+
+                User Query
+                    ↓
+             Query Understanding
+                    ↓
+       ┌────────────┼─────────────┐
+       ↓            ↓             ↓
+ Requirement     Product       General
+   Query          Search        Search
+       ↓            ↓             ↓
+  Compliance     Retrieval     Retrieval/QA
+       ↓
+ PASS/FAIL/
+ UNKNOWN
+
+
+
+
+
+Query type 1 — Requirement
+      "Bed must have safe working load >= 200 kg"
+      → PASS / FAIL / UNKNOWN
+
+Query type 2 — Product existence
+      "Is the ICU bed present?"
+      → PRESENT / NOT_PRESENT / UNKNOWN
+
+Query type 3 — Product search
+      "Show me ICU beds"
+      → Product A
+      → Product B
+      → Product C
+
+Query type 4 — Feature search
+      "Which tables support Trendelenburg?"
+      → Product A — page X
+      → Product B — page Y
+
+
+
+              python -m src.retrieval.product_matcher

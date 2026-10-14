@@ -1,0 +1,30 @@
+[
+  {
+    "question": "What warranty does the indexed model include?",
+    "expected_intent": "DOCUMENT_RETRIEVAL",
+    "expected_status": "EVIDENCE_RETRIEVED",
+    "expected_evidence_term": "warranty",
+    "limitations": ["Retrieval returns source passages, not a generated summary."]
+  },
+  {
+    "question": "Is this product suitable for intensive care?",
+    "expected_intent": "UNSUPPORTED_OR_AMBIGUOUS",
+    "expected_status": "UNKNOWN",
+    "expected_evidence_term": null,
+    "limitations": ["Suitability requires an explicit, source-backed criterion."]
+  },
+  {
+    "question": "How many units are in stock today?",
+    "expected_intent": "INVENTORY_COUNT",
+    "expected_status": "UNKNOWN",
+    "expected_evidence_term": null,
+    "limitations": ["No operational inventory source is connected."]
+  },
+  {
+    "question": "Does the referenced model support underwater operation?",
+    "expected_intent": "FEATURE_EXISTENCE",
+    "expected_status": "UNKNOWN",
+    "expected_evidence_term": null,
+    "limitations": ["The result depends on model-specific positive or negative passages."]
+  }
+]

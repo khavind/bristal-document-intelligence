@@ -2,6 +2,11 @@ import pytest
 
 from src.retrieval.value_parser import parse_value
 from src.retrieval.unit_converter import convert
+from src.retrieval.requirement_parser import (
+    classify_query,
+    find_value_and_unit,
+    parse_requirement,
+)
 
 
 def test_grams_to_kilograms():
@@ -127,3 +132,70 @@ def test_multiple_values_with_slash():
     assert parsed["type"] == "multiple"
     assert parsed["values"] == [25, 50]
     assert parsed["unit"] == "mm/sec"
+
+
+def test_symbolic_operators_preserve_operator_and_query_classification():
+    expected = {
+        ">=": ">=",
+        ">": ">",
+        "<=": "<=",
+        "<": "<",
+        "=": "=",
+    }
+    for symbol, operator in expected.items():
+        requirement = parse_requirement(f"Width {symbol} 90 cm")
+        assert requirement["operator"] == operator
+        assert requirement["query_type"] == "technical"
+
+
+def test_natural_language_operators_preserve_operator():
+    cases = {
+        "Width at least 90 cm": ">=",
+        "Width more than 90 cm": ">",
+        "Width at most 90 cm": "<=",
+        "Width less than 90 cm": "<",
+        "Width exactly 90 cm": "=",
+        "Width equal to 90 cm": "=",
+    }
+    for query, operator in cases.items():
+        assert parse_requirement(query)["operator"] == operator
+
+
+@pytest.mark.parametrize(
+    ("operator_text", "operator"),
+    [
+        (">=", ">="),
+        (">", ">"),
+        ("<=", "<="),
+        ("<", "<"),
+        ("=", "="),
+        ("at least", ">="),
+        ("more than", ">"),
+        ("at most", "<="),
+        ("less than", "<"),
+        ("exactly", "="),
+    ],
+)
+def test_comparison_value_is_parsed_after_operator_not_from_model_number(
+    operator_text, operator
+):
+    requirement = parse_requirement(
+        f"Hillrom 900 Accella bed safe working load {operator_text} 200 kg"
+    )
+    assert requirement["attribute"] == "Safe Working Load"
+    assert requirement["operator"] == operator
+    assert requirement["value"] == 200
+    assert requirement["unit"] == "kg"
+
+
+def test_short_unit_symbols_require_word_boundaries():
+    assert find_value_and_unit("at least 5 months") == (5.0, None)
+    assert find_value_and_unit("at least 5 mammals") == (5.0, None)
+    assert find_value_and_unit("at least 5 m") == (5.0, "m")
+    assert find_value_and_unit("at least 5 meters") == (5.0, "m")
+    assert find_value_and_unit("at least 5 mm") == (5.0, "mm")
+
+
+def test_symbolic_comparisons_do_not_match_inside_other_tokens():
+    assert classify_query("The width is < 90 cm") == "technical"
+    assert classify_query("The table supports Trendelenburg") == "capability"

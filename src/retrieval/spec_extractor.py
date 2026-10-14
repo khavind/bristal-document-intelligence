@@ -278,9 +278,11 @@ def create_source(chunk):
     Preserve document provenance for every extracted specification.
     """
     return {
-        "document": chunk["document"],
-        "page": chunk["page"],
-        "chunk_id": chunk["chunk_id"],
+        "document": chunk.get("document"),
+        "page": chunk.get("page"),
+        "section": chunk.get("section"),
+        "chunk_id": chunk.get("chunk_id"),
+        "evidence": chunk.get("text", ""),
     }
 
 
