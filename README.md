@@ -38,7 +38,8 @@ The goal of **Bristal Healthcare Intelligence** is to build an intelligent syste
 
 The query layer produces a validated local query plan and routes supported
 queries into `PRODUCT_PRESENCE`, `PRODUCT_COUNT`, `FEATURE_EXISTENCE`,
-`INVENTORY_COUNT`, `NUMERIC_SPECIFICATION`, or `DOCUMENT_RETRIEVAL`.
+`INVENTORY_COUNT`, `NUMERIC_SPECIFICATION`, `PRODUCT_COMPARISON`,
+`PRODUCT_SUMMARY`, or `DOCUMENT_RETRIEVAL`.
 Unsupported or ambiguous questions abstain. Catalogue counts represent
 distinct identities found in processed documents, not stock counts. Inventory
 queries return `UNKNOWN` until a trusted inventory source is connected.
@@ -61,7 +62,8 @@ selects no model or dependency. Compound numeric queries support uniformly
 `minimum`, `average`, and `sum` aggregations are supported across indexed
 products when every identified model has a comparable value. A numeric
 threshold without an explicit attribute is not matched to a convenient
-candidate attribute.
+candidate attribute. Recognized flow-rate values support `ml/hr` and `l/hr`
+conversion; unsupported or missing units remain unevaluable.
 
 Numeric filtering evaluates every reliably indexed product in the requested
 category and returns product-scoped `PASS`, `FAIL`, or `UNKNOWN` rows.
@@ -73,7 +75,9 @@ retrieved passages, with source locations and explicit standard/optional
 labels only when the extractor recorded them. Natural-language document
 questions return at most three ranked passages by default; `search_documents`
 defaults to five and accepts a configurable `limit`. Retrieval favors
-explanatory passages for named features.
+explanatory passages for named features and indexes section headings when
+ranking evidence. The interactive matcher retains single-query input; enter
+`BATCH` to process one requirement per line and `END` to finish the batch.
 
 This is a deterministic local fallback, not universal natural-language
 understanding. It does not yet provide LLM-based answer composition, robust

@@ -13,6 +13,7 @@ PROCESSED_DIR = Path("data/processed")
 STANDARD_MARKER = "•"
 OPTIONAL_MARKER = "º"
 MARKERS = {STANDARD_MARKER, OPTIONAL_MARKER}
+UNKNOWN_MARKER = "�"
 
 
 NOISE_ATTRIBUTES = {
@@ -228,6 +229,10 @@ TECHNICAL_TERMS = {
     "degree",
     "angle",
     "angles",
+    "trendelenburg",
+    "cpr",
+    "lever",
+    "pendant",
     "dimension",
     "dimensions",
     "position",
@@ -273,7 +278,17 @@ def clean_line(line):
     return re.sub(r"\s+", " ", (line or "").strip())
 
 
-def create_source(chunk):
+def _normalize_extracted_line(line):
+    line = clean_line(line)
+    line = re.sub(r"(?<=\d)�(?=\s|$)", "°", line)
+    if line.startswith(UNKNOWN_MARKER):
+        remainder = line[len(UNKNOWN_MARKER):].strip()
+        if remainder:
+            return f"{STANDARD_MARKER} {remainder}"
+    return line
+
+
+def create_source(chunk, evidence=None):
     """
     Preserve document provenance for every extracted specification.
     """
@@ -282,7 +297,7 @@ def create_source(chunk):
         "page": chunk.get("page"),
         "section": chunk.get("section"),
         "chunk_id": chunk.get("chunk_id"),
-        "evidence": chunk.get("text", ""),
+        "evidence": evidence if evidence is not None else chunk.get("text", ""),
     }
 
 
@@ -307,7 +322,10 @@ def add_specification(
         "raw_value": raw_value,
         "parsed_value": parsed_value,
         "status": status,
-        "source": create_source(chunk),
+        "source": create_source(
+            chunk,
+            evidence=f"{attribute}\n{raw_value}",
+        ),
     }
 
     if parent_attribute:
@@ -370,6 +388,21 @@ def looks_like_sentence(line):
     line = clean_line(line)
 
     if not line:
+        return False
+
+    if line.startswith((STANDARD_MARKER, OPTIONAL_MARKER, UNKNOWN_MARKER)):
+        return False
+
+    parsed_line = parse_value(line)
+    if isinstance(parsed_line, dict) and parsed_line.get("type") in {
+        "scalar",
+        "range",
+        "multiple",
+        "paired",
+        "compound",
+        "tolerance",
+        "mixed",
+    }:
         return False
 
     words = line.split()
@@ -536,13 +569,23 @@ def is_likely_attribute(line):
 
     normalized = line.lower()
 
-    if normalized in NOISE_ATTRIBUTES or normalized in AMBIGUOUS_ATTRIBUTE_LABELS:
+    technical_section_label = (
+        normalized.endswith(" section")
+        and has_technical_attribute_term(line)
+    )
+    if (
+        normalized in NOISE_ATTRIBUTES
+        and not technical_section_label
+    ) or normalized in AMBIGUOUS_ATTRIBUTE_LABELS:
         return False
 
     if looks_like_metadata(line):
         return False
 
-    if looks_like_generic_metadata_label(line):
+    if looks_like_generic_metadata_label(line) and not (
+        line.lower().endswith(" section")
+        and has_technical_attribute_term(line)
+    ):
         return False
 
     if looks_like_section_reference(line):
@@ -784,7 +827,14 @@ def is_valid_attribute_value_pair(attribute, raw_value, parsed_value, chunk=None
     if not attribute or not raw_value:
         return False
 
-    if looks_like_generic_metadata_label(attribute):
+    bullet_prefixes = tuple(f"{marker} " for marker in MARKERS)
+    if attribute.startswith(bullet_prefixes) or raw_value.startswith(bullet_prefixes):
+        return False
+
+    if looks_like_generic_metadata_label(attribute) and not (
+        attribute.lower().endswith(" section")
+        and has_technical_attribute_term(attribute)
+    ):
         return False
 
     if looks_like_section_reference(raw_value):
@@ -800,6 +850,14 @@ def is_valid_attribute_value_pair(attribute, raw_value, parsed_value, chunk=None
         return False
 
     if not is_likely_technical_value(raw_value, parsed_value):
+        return False
+
+    if (
+        isinstance(parsed_value, dict)
+        and parsed_value.get("type") == "categorical"
+        and is_likely_attribute(raw_value)
+        and has_technical_attribute_term(raw_value)
+    ):
         return False
 
     # A value that looks like a technical attribute should generally not
@@ -835,7 +893,7 @@ def merge_wrapped_bullet_lines(lines):
     while i < len(lines):
         current = clean_line(lines[i])
 
-        if current.startswith("•") or current.startswith("º"):
+        if current.startswith((STANDARD_MARKER, OPTIONAL_MARKER)):
             combined = current
             i += 1
 
@@ -846,11 +904,14 @@ def merge_wrapped_bullet_lines(lines):
                     i += 1
                     continue
 
-                if next_line.startswith("•") or next_line.startswith("º"):
+                if (
+                    next_line.startswith((STANDARD_MARKER, OPTIONAL_MARKER))
+                    or next_line == UNKNOWN_MARKER
+                ):
                     break
 
                 # Don't consume obvious values/markers
-                if next_line in MARKERS:
+                if next_line in MARKERS or next_line == UNKNOWN_MARKER:
                     break
 
                 # A short continuation line belongs to the bullet.
@@ -896,9 +957,9 @@ def extract_specifications_from_chunks(chunks, product_name=None):
 
     for chunk in chunks:
         raw_lines = [
-        clean_line(line)
-        for line in chunk.get("text", "").splitlines()
-        if clean_line(line)
+            _normalize_extracted_line(line)
+            for line in chunk.get("text", "").splitlines()
+            if clean_line(line)
         ]
 
         lines = merge_wrapped_bullet_lines(raw_lines)

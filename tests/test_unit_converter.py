@@ -61,3 +61,12 @@ def test_unsupported_unit():
     with pytest.raises(ValueError):
 
         convert(5, "kg", "litres")
+
+
+def test_volume_flow_rate_conversions_and_dimension_guard():
+    assert convert(1000, "ml/hr", "ml/hr") == pytest.approx(1000)
+    assert convert(1, "l/hr", "ml/hr") == pytest.approx(1000)
+    assert convert(1000, "ml/h", "l/h") == pytest.approx(1)
+
+    with pytest.raises(ValueError):
+        convert(100, "ml/hr", "hours")

@@ -200,6 +200,28 @@ def test_retrieval_returns_source_provenance_and_honors_product_filter():
     }
 
 
+def test_retrieval_indexes_section_metadata_for_feature_summaries():
+    chunk = {
+        "document": "model_a.pdf",
+        "page": 2,
+        "section": "Features and Benefits",
+        "chunk_id": "chunk_2",
+        "text": "An integrated scale calculates BMI and reduces workflow steps.",
+    }
+
+    results = retrieve_passages(
+        "features",
+        [chunk],
+        [_product_record("Model Alpha", "model_a.pdf")],
+        entity_refs=("Model Alpha",),
+    )
+
+    assert len(results) == 1
+    assert results[0]["page"] == 2
+    assert results[0]["section"] == "Features and Benefits"
+    assert "integrated scale" in results[0]["evidence"]
+
+
 def test_search_api_reuses_retriever_and_rejects_unknown_product(monkeypatch):
     monkeypatch.setattr(
         "src.retrieval.search._catalogue_records",

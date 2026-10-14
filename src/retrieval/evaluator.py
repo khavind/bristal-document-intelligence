@@ -1,5 +1,7 @@
 # from value_parser import parse_value
 # from unit_converter import convert
+from copy import deepcopy
+
 from src.retrieval.requirement_parser import attributes_equivalent
 from src.retrieval.value_parser import parse_value
 from src.retrieval.unit_converter import convert
@@ -34,7 +36,7 @@ def evaluate_requirement(requirement, product_value_text, candidate_attribute=No
 
     product_value = None
     if isinstance(candidate, dict):
-        product_value = candidate.get("parsed_value")
+        product_value = deepcopy(candidate.get("parsed_value"))
     if not isinstance(product_value, dict):
         product_value = parse_value(product_value_text)
 

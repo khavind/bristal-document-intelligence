@@ -132,3 +132,24 @@ def test_main_selects_batch_mode(monkeypatch):
     product_matcher.main()
 
     assert calls == ["requirement one"]
+
+
+def test_unknown_cli_answer_displays_the_explanation():
+    output = []
+
+    product_matcher._print_query_results(
+        "Battery backup must be at least 4 hours",
+        [
+            {
+                "query_type": "NUMERIC_SPECIFICATION",
+                "status": "UNKNOWN",
+                "answer": "UNKNOWN",
+                "reason": "No comparable source-backed battery runtime duration was found.",
+            }
+        ],
+        output.append,
+    )
+
+    rendered = "\n".join(output)
+    assert "Status: UNKNOWN" in rendered
+    assert "No comparable source-backed battery runtime duration was found." in rendered

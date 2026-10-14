@@ -287,7 +287,7 @@ def test_product_summary_returns_traceable_specifications_and_passages(monkeypat
             "document": "hillrom.pdf",
             "product": product["product"],
             "page": 2,
-            "section": "Safety",
+            "section": "Features and Benefits",
             "chunk_id": "hillrom:2",
             "text": (
                 "The bed has a 3-Mode Bed Exit Alarm and an audible brake-off "
@@ -308,8 +308,91 @@ def test_product_summary_returns_traceable_specifications_and_passages(monkeypat
     assert any(fact["attribute"] == "Safe working load" for fact in result["summary"]["facts"])
     assert all(fact["source"]["page"] == 3 for fact in result["summary"]["facts"])
     assert all(fact["source"]["document"] == "hillrom.pdf" for fact in result["summary"]["facts"])
+    assert result["summary"]["passages"][0]["page"] == 2
+    assert "audible brake-off indicator" in result["summary"]["passages"][0]["evidence"]
     assert "hillrom.pdf" in result["answer"]
     assert "(optional)" in result["answer"]
+
+
+def test_product_summary_excludes_generic_about_passages_and_invalid_pairs(monkeypatch):
+    product = _record("Hillrom 900 Accella bed", "hillrom.pdf")
+    invalid_specification = {
+        "product": product["product"],
+        "document": "hillrom.pdf",
+        "page": 1,
+        "section": "Overview",
+        "chunk_id": "hillrom:1",
+        "attribute": "Manufacturer overview",
+        "raw_value": "A global manufacturer serving healthcare providers.",
+        "parsed_value": {
+            "type": "categorical",
+            "value": "A global manufacturer serving healthcare providers.",
+        },
+        "source": {
+            "document": "hillrom.pdf",
+            "page": 1,
+            "section": "Overview",
+            "chunk_id": "hillrom:1",
+            "evidence": "A global manufacturer serving healthcare providers.",
+        },
+    }
+    marker_only_specification = {
+        "product": product["product"],
+        "document": "hillrom.pdf",
+        "page": 3,
+        "section": "Features",
+        "chunk_id": "hillrom:3",
+        "attribute": "Simple Weigh",
+        "raw_value": "•",
+        "availability": "standard",
+        "parsed_value": {"type": "boolean", "value": True},
+        "source": {
+            "document": "hillrom.pdf",
+            "page": 3,
+            "section": "Features",
+            "chunk_id": "hillrom:3",
+            "evidence": "Simple Weigh\n•",
+        },
+    }
+    _patch_corpus(
+        monkeypatch,
+        [product],
+        [invalid_specification, marker_only_specification],
+    )
+    monkeypatch.setattr(
+        "src.retrieval.product_matcher.retrieve_passages",
+        lambda *args, **kwargs: [
+            {
+                "source": {
+                    "document": "hillrom.pdf",
+                    "page": 1,
+                    "section": "About the manufacturer",
+                    "chunk_id": "hillrom:1",
+                    "evidence": "A global manufacturer serving healthcare providers.",
+                }
+            },
+            {
+                "source": {
+                    "document": "hillrom.pdf",
+                    "page": 2,
+                    "section": "Safety",
+                    "chunk_id": "hillrom:2",
+                    "evidence": "The bed has an audible brake-off indicator.",
+                }
+            },
+        ],
+    )
+
+    result = match_requirement(
+        "Summarize the important features of the Hillrom bed."
+    )[0]
+
+    assert result["status"] == "SUMMARY"
+    assert result["summary"]["facts"] == []
+    assert len(result["summary"]["passages"]) == 1
+    assert result["summary"]["passages"][0]["source"]["page"] == 2
+    assert "global manufacturer" not in result["answer"]
+    assert "brake-off indicator" in result["answer"]
 
 
 def test_product_specific_retrieval_prefers_direct_feature_explanation(monkeypatch):

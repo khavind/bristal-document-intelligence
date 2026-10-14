@@ -1,3 +1,5 @@
+from copy import deepcopy
+
 from src.retrieval.evaluator import evaluate_requirement
 from src.retrieval.requirement_parser import parse_requirement
 
@@ -136,12 +138,12 @@ def test_recognized_angle_and_rate_units_are_evaluable_in_same_unit():
     ) == "PASS"
 
 
-def test_unknown_unit_is_not_assumed_convertible_even_when_spellings_match():
+def test_recognized_flow_unit_is_comparable_and_other_units_keep_existing_behavior():
     assert evaluate_requirement(
         {"attribute": "Flow Rate", "operator": "=", "value": 5, "unit": "ml/hr"},
         "5 ml/hr",
         "Flow Rate",
-    ) == "UNKNOWN"
+    ) == "PASS"
     assert evaluate_requirement(
         {"attribute": "Heart Rate", "operator": "=", "value": 70, "unit": "bpm"},
         "70 bpm",
@@ -157,3 +159,61 @@ def test_unknown_unit_is_not_assumed_convertible_even_when_spellings_match():
         "70 samples/sec",
         "Heart Rate",
     ) == "UNKNOWN"
+
+
+def test_repeated_scalar_evaluation_does_not_mutate_source_parsed_value():
+    candidate = {
+        "attribute": "Safe Working Load",
+        "raw_value": "250 lb",
+        "parsed_value": {"type": "scalar", "value": 250.0, "unit": "lb"},
+    }
+    original = deepcopy(candidate)
+    requirement = {
+        "attribute": "Safe Working Load",
+        "operator": ">=",
+        "value": 100,
+        "unit": "kg",
+    }
+
+    assert evaluate_requirement(requirement, "", candidate=candidate) == "PASS"
+    assert evaluate_requirement(requirement, "", candidate=candidate) == "PASS"
+    assert candidate == original
+
+
+def test_repeated_range_evaluation_does_not_mutate_source_parsed_value():
+    candidate = {
+        "attribute": "Width",
+        "raw_value": "250 to 300 inches",
+        "parsed_value": {
+            "type": "range",
+            "min": 250.0,
+            "max": 300.0,
+            "unit": "inch",
+        },
+    }
+    original = deepcopy(candidate)
+    requirement = {
+        "attribute": "Width",
+        "operator": ">=",
+        "value": 100,
+        "unit": "cm",
+    }
+
+    assert evaluate_requirement(requirement, "", candidate=candidate) == "PASS"
+    assert evaluate_requirement(requirement, "", candidate=candidate) == "PASS"
+    assert candidate == original
+
+
+def test_flow_rate_comparison_preserves_exclusive_boundary_and_converts_units():
+    requirement = parse_requirement("Flow rate above 100 ml/hr")
+
+    assert evaluate_requirement(requirement, "100 ml/hr", "Flow Rate") == "FAIL"
+    assert evaluate_requirement(requirement, "100.1 ml/hr", "Flow Rate") == "PASS"
+    assert evaluate_requirement(requirement, "0.101 l/hr", "Flow Rate") == "PASS"
+    assert evaluate_requirement(requirement, "100 V", "Flow Rate") == "UNKNOWN"
+
+
+def test_malformed_numeric_threshold_does_not_become_a_comparable_requirement():
+    requirement = parse_requirement("Flow rate above many ml/hr")
+    assert requirement["operator"] == ">"
+    assert requirement["value"] is None

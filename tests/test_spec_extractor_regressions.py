@@ -1,4 +1,9 @@
-from src.retrieval.spec_extractor import create_source, is_valid_attribute_value_pair
+from src.ingestion.chunker import chunk_page
+from src.retrieval.spec_extractor import (
+    create_source,
+    extract_specifications_from_chunks,
+    is_valid_attribute_value_pair,
+)
 from src.retrieval.value_parser import parse_value
 
 
@@ -70,6 +75,14 @@ def test_rejects_prose_fragment():
     assert not is_valid_attribute_value_pair("Mains power supply is", "connected to the mobile", parse_value("connected to the mobile"))
 
 
+def test_rejects_bullet_prefixed_feature_lines_as_attribute_value_pairs():
+    assert not is_valid_attribute_value_pair(
+        "• Wired connection for bed exit alarm",
+        "• Wireless connectivity",
+        parse_value("• Wireless connectivity"),
+    )
+
+
 def test_provenance_remains_correct():
     chunk = {
         "document": "doc-1",
@@ -86,3 +99,86 @@ def test_provenance_remains_correct():
         "chunk_id": "chunk_42",
         "evidence": "Height\n510 mm to 1,060 mm",
     }
+
+
+def test_corrupted_bullet_feature_lines_are_not_paired_as_specifications():
+    chunk = {
+        "document": "fixture",
+        "page": 3,
+        "section": "Features",
+        "chunk_id": "chunk_3",
+        "text": (
+            "Safe working load\n250 kg\n"
+            "� \t Battery backup\n"
+            "� \t Bilateral mechanical CPR lever\n"
+            "� \t Low height indicator\n"
+            "� \t Electric CPR\n"
+        ),
+    }
+
+    specifications = extract_specifications_from_chunks([chunk])
+
+    assert [(item["attribute"], item["raw_value"]) for item in specifications] == [
+        ("Safe working load", "250 kg")
+    ]
+    assert specifications[0]["source"]["evidence"] == "Safe working load\n250 kg"
+
+
+def test_replacement_glyph_degrees_preserve_ranges_and_prevent_reversed_pairs():
+    chunk = {
+        "document": "fixture",
+        "page": 3,
+        "section": "Bed angles",
+        "chunk_id": "chunk_3",
+        "text": (
+            "Foot section\n"
+            "-3� to -22�\n"
+            "Trendelenburg/reverse Trendelenburg\n"
+            "+17� to -17�"
+        ),
+    }
+
+    specifications = extract_specifications_from_chunks([chunk])
+
+    assert [(item["attribute"], item["raw_value"]) for item in specifications] == [
+        ("Foot section", "-3° to -22°"),
+        ("Trendelenburg/reverse Trendelenburg", "+17° to -17°"),
+    ]
+
+
+def test_chunker_starts_new_chunks_at_heading_boundaries():
+    chunks, _ = chunk_page(
+        3,
+        (
+            "TECHNICAL SPECIFICATIONS\n"
+            "Safe working load\n250 kg\n"
+            "ADDITIONAL STANDARD FEATURES\n"
+            "Central brake at foot end\n"
+        ),
+        "fixture",
+        1,
+    )
+
+    assert [(chunk["section"], chunk["text"]) for chunk in chunks] == [
+        ("TECHNICAL SPECIFICATIONS", "TECHNICAL SPECIFICATIONS\nSafe working load\n250 kg"),
+        ("ADDITIONAL STANDARD FEATURES", "ADDITIONAL STANDARD FEATURES\nCentral brake at foot end"),
+    ]
+
+
+def test_chunker_preserves_numbered_technical_title_and_sentence_case_section():
+    chunks, _ = chunk_page(
+        3,
+        (
+            "MODEL 900 TECHNICAL SPECIFICATIONS\n"
+            "Safe working load\n250 kg\n"
+            "Bed angles\n"
+            "Head section\n0 to 65°"
+        ),
+        "fixture",
+        1,
+    )
+
+    assert [chunk["section"] for chunk in chunks] == [
+        "MODEL 900 TECHNICAL SPECIFICATIONS",
+        "Bed angles",
+    ]

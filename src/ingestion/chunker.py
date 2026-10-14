@@ -33,8 +33,9 @@ def looks_like_heading(line):
     if len(line) > 100:
         return False
 
-    # Avoid obvious address/contact lines.
-    if re.search(r"\d{3,}", line):
+    # A technical-specification title can include a model number and still
+    # provide useful section context for the facts that follow.
+    if re.search(r"\d{3,}", line) and "specification" not in line.lower():
         return False
 
     # Strong signal: uppercase heading.
@@ -48,6 +49,14 @@ def looks_like_heading(line):
 
     # Another useful signal: title-style heading.
     words = line.split()
+
+    if (
+        len(words) == 2
+        and words[0][:1].isupper()
+        and words[1].islower()
+        and words[1].endswith("s")
+    ):
+        return True
 
     if 1 <= len(words) <= 8:
         capitalized_words = sum(
@@ -126,9 +135,20 @@ def chunk_page(page_number, page_text, document, chunk_id, page_data=None):
 
     for line in lines:
 
-        # If this looks like a heading, remember it as metadata.
-        # We do NOT immediately create a new chunk.
+        # Start a new chunk at heading boundaries so each fact inherits only
+        # the section context active for its own text.
         if looks_like_heading(line):
+            if current_lines:
+                chunk_id = save_chunk(
+                    chunks,
+                    chunk_id,
+                    document,
+                    page_number,
+                    current_section,
+                    current_lines,
+                    layout=layout,
+                )
+                current_lines = []
             current_section = line
 
         current_lines.append(line)

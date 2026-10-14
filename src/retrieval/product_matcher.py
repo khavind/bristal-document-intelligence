@@ -18,6 +18,7 @@ from src.retrieval.requirement_parser import (
     normalize_attribute,
     parse_requirement,
 )
+from src.retrieval.spec_extractor import MARKERS, is_valid_attribute_value_pair
 from src.retrieval.unit_converter import convert, normalize_unit
 from src.retrieval.value_parser import parse_value
 
@@ -63,6 +64,24 @@ def _catalogue_records():
         _load_processed_chunks(),
         _load_processed_specifications(),
     ).catalogue_records()
+
+
+def _find_supporting_excerpt(text, attribute, raw_value):
+    lines = [line.strip() for line in str(text or "").splitlines() if line.strip()]
+    normalize = lambda value: re.sub(r"\s+", " ", str(value or "")).casefold()
+    attribute_text = normalize(attribute)
+    value_text = normalize(raw_value)
+    for index, line in enumerate(lines):
+        normalized_line = normalize(line)
+        if attribute_text and value_text and attribute_text in normalized_line and value_text in normalized_line:
+            return line
+        if (
+            normalized_line == attribute_text
+            and index + 1 < len(lines)
+            and normalize(lines[index + 1]) == value_text
+        ):
+            return f"{line}\n{lines[index + 1]}"
+    return None
 
 
 def _load_processed_chunks():
@@ -121,6 +140,21 @@ def _load_processed_specifications():
             for specification in product.get("specifications", []):
                 if not isinstance(specification, dict):
                     continue
+                attribute = specification.get("attribute")
+                raw_value = specification.get("raw_value")
+                parsed_value = specification.get("parsed_value")
+                if not is_valid_attribute_value_pair(
+                    attribute or "",
+                    raw_value or "",
+                    parsed_value or parse_value(raw_value or ""),
+                ):
+                    LOGGER.warning(
+                        "Skipping invalid extracted attribute/value pair in %s: %r -> %r",
+                        path.name,
+                        attribute,
+                        raw_value,
+                    )
+                    continue
                 source = specification.get("source") or {}
                 source = dict(source) if isinstance(source, dict) else {}
                 source.setdefault(
@@ -146,8 +180,14 @@ def _load_processed_specifications():
                     for field in ("page", "section", "chunk_id"):
                         if source.get(field) is None:
                             source[field] = chunk.get(field)
-                    raw_value = specification.get("raw_value")
-                    if not source.get("evidence") or source.get("evidence") == raw_value:
+                    excerpt = _find_supporting_excerpt(
+                        chunk.get("text"),
+                        attribute,
+                        raw_value,
+                    )
+                    if excerpt:
+                        source["evidence"] = excerpt
+                    elif not source.get("evidence") or source.get("evidence") == raw_value:
                         source["evidence"] = chunk.get("text") or raw_value or ""
                 source.setdefault(
                     "evidence",
@@ -159,9 +199,9 @@ def _load_processed_specifications():
                     "page": source.get("page"),
                     "section": source.get("section"),
                     "chunk_id": source.get("chunk_id"),
-                    "attribute": specification.get("attribute"),
-                    "raw_value": specification.get("raw_value"),
-                    "parsed_value": specification.get("parsed_value"),
+                    "attribute": attribute,
+                    "raw_value": raw_value,
+                    "parsed_value": parsed_value,
                     "availability": specification.get("status"),
                     "source": source,
                 }
@@ -828,10 +868,12 @@ def _match_technical_requirement(query, plan=None, catalogue_records=None):
         ).append(specification)
 
     results = []
+    product_documents = {}
     for record_group in grouped_records.values():
         record = record_group[0]
         product_name = record["product"]
         documents = {item.get("document") for item in record_group}
+        product_documents[product_name] = documents
         product_specs = [
             specification
             for document in documents
@@ -939,6 +981,35 @@ def _match_technical_requirement(query, plan=None, catalogue_records=None):
         group_by_attribute=True,
     )
 
+    if attributes_equivalent(requirement.get("attribute"), "Battery Backup"):
+        chunks = _load_processed_chunks()
+        for result in results:
+            if result.get("status") != "UNKNOWN":
+                continue
+            documents = product_documents.get(result.get("product"), set())
+            related_evidence = _find_battery_duration_evidence(chunks, documents)
+            if related_evidence:
+                result["related_evidence"] = related_evidence
+                result["reason"] = (
+                    "The source contains a qualified battery-operation duration, "
+                    "but its conditions or measurement basis are not established "
+                    "as equivalent to the requested battery-backup duration."
+                )
+                result_sources = list(result.get("sources", []))
+                result_sources.extend(
+                    source
+                    for source in related_evidence
+                    if source not in result_sources
+                )
+                result["sources"] = result_sources
+                result["source_evidence"] = "\n---\n".join(
+                    source["evidence"] for source in related_evidence
+                )
+            else:
+                result["reason"] = (
+                    "No comparable source-backed battery runtime duration was found."
+                )
+
     if results:
         return results
 
@@ -956,6 +1027,51 @@ def _match_technical_requirement(query, plan=None, catalogue_records=None):
             query_type="NUMERIC_SPECIFICATION",
         )
     ]
+
+
+def _find_battery_duration_evidence(chunks, documents):
+    duration_pattern = re.compile(
+        r"\b(?:\d+(?:[.,]\d+)?|one|several|few)\s+"
+        r"(?:hours?|days?|minutes?)\b",
+        re.IGNORECASE,
+    )
+    battery_pattern = re.compile(r"\b(?:battery|batteries)\b", re.IGNORECASE)
+    function_use_pattern = re.compile(
+        r"\b(?:functions?|operation)\b.{0,120}\b"
+        r"(?:used|guaranteed|operated|available|lasts?)\b|"
+        r"\b(?:used|guaranteed|operated|available|lasts?)\b.{0,120}\b"
+        r"(?:electrical\s+)?(?:functions?|operation)\b",
+        re.IGNORECASE,
+    )
+    evidence = []
+    for chunk in chunks:
+        if chunk.get("document") not in documents:
+            continue
+        text = re.sub(r"\s+", " ", str(chunk.get("text") or ""))
+        for match in duration_pattern.finditer(text):
+            start = max(0, match.start() - 220)
+            end = min(len(text), match.end() + 220)
+            excerpt = text[start:end].strip()
+            if (
+                not battery_pattern.search(excerpt)
+                or not function_use_pattern.search(excerpt)
+                or re.search(
+                    r"\b(?:interval|charging|recharging|switch(?:es)? off|shutdown)\b",
+                    excerpt,
+                    re.IGNORECASE,
+                )
+            ):
+                continue
+            source = {
+                "document": chunk.get("document"),
+                "page": chunk.get("page"),
+                "section": chunk.get("section"),
+                "chunk_id": chunk.get("chunk_id"),
+                "evidence": excerpt,
+            }
+            if source not in evidence:
+                evidence.append(source)
+    return evidence
 
 
 def _match_presence_or_capability(query):
@@ -1614,6 +1730,21 @@ def _summary_category(attribute):
     return "Other specifications"
 
 
+def _is_generic_summary_passage(passage):
+    source = passage.get("source") or {}
+    section = _normalize_text(source.get("section"))
+    if section.startswith("about"):
+        return True
+    text = str(source.get("evidence") or "").strip()
+    first_line = _normalize_text(text.splitlines()[0] if text else "")
+    return bool(
+        re.match(
+            r"^about\s+(?:the\s+)?(?:company|manufacturer|organization|organisation|us)\b",
+            first_line,
+        )
+    )
+
+
 def _match_product_summary(plan, catalogue_records):
     product_name = plan.entity_refs[0]
     records = [
@@ -1632,7 +1763,11 @@ def _match_product_summary(plan, catalogue_records):
         parsed = specification.get("parsed_value")
         if not attribute or not raw_value:
             continue
+        if raw_value.strip() in MARKERS:
+            continue
         if isinstance(parsed, dict) and parsed.get("type") in {"unknown", "not_available"}:
+            continue
+        if not is_valid_attribute_value_pair(attribute, raw_value, parsed or parse_value(raw_value)):
             continue
         source = _comparison_source(specification)
         fact = {
@@ -1647,13 +1782,18 @@ def _match_product_summary(plan, catalogue_records):
             sources.append(source)
 
     passages = retrieve_passages(
-        plan.question,
+        " ".join(plan.focus_terms) or "features",
         _load_processed_chunks(),
         catalogue_records=catalogue_records,
         entity_refs=(product_name,),
         limit=2,
         focus_terms=plan.focus_terms,
     )
+    passages = [
+        passage
+        for passage in passages
+        if not _is_generic_summary_passage(passage)
+    ]
     for passage in passages:
         source = passage.get("source")
         if isinstance(source, dict) and source not in sources:
@@ -2026,12 +2166,32 @@ def _print_query_results(query, results, output_fn=None):
         if result.get("count") is not None:
             output_fn(f"Distinct catalogue models: {result['count']}")
 
-        answer = result.get("answer") or result.get("reason")
+        answer = result.get("answer")
+        if result.get("status") == "UNKNOWN" and (
+            not answer or _normalize_text(answer) == "unknown"
+        ):
+            answer = result.get("reason") or result.get("explanation") or answer
+        answer = answer or result.get("reason")
         if answer:
             output_fn(f"Answer/evidence: {answer}")
+        missing_information = result.get("missing_information") or []
+        if missing_information:
+            output_fn(
+                "Missing information: "
+                + ", ".join(str(item) for item in missing_information)
+            )
         evidence = result.get("evidence") or result.get("source_evidence")
         if evidence and evidence != answer:
             output_fn(f"Supporting evidence: {evidence}")
+        for related in result.get("related_evidence", []):
+            if not isinstance(related, dict):
+                continue
+            location = ", ".join(
+                str(related[field])
+                for field in ("document", "page", "section", "chunk_id")
+                if related.get(field) is not None
+            )
+            output_fn(f"Related, non-comparable evidence [{location}]: {related.get('evidence', '')}")
 
         sources = result.get("sources")
         if not isinstance(sources, list) or not sources:

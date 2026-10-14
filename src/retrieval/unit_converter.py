@@ -58,6 +58,12 @@ UNIT_CONVERSIONS = {
     },
     "sample_rate": {
         "samples/sec": 1
+    },
+
+    # Base unit: millilitres per hour
+    "volume_flow_rate": {
+        "ml/hr": 1,
+        "l/hr": 1000
     }
 }
 
@@ -133,6 +139,18 @@ UNIT_ALIASES = {
     "sample/sec": "samples/sec",
     "sample/s": "samples/sec",
     "samples/s": "samples/sec",
+    "ml/hr": "ml/hr",
+    "ml/h": "ml/hr",
+    "milliliter/hour": "ml/hr",
+    "milliliters/hour": "ml/hr",
+    "millilitre/hour": "ml/hr",
+    "millilitres/hour": "ml/hr",
+    "l/hr": "l/hr",
+    "l/h": "l/hr",
+    "liter/hour": "l/hr",
+    "liters/hour": "l/hr",
+    "litre/hour": "l/hr",
+    "litres/hour": "l/hr",
 
     # Angle
     "°": "°",

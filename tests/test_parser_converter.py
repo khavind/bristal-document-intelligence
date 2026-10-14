@@ -152,8 +152,13 @@ def test_natural_language_operators_preserve_operator():
     cases = {
         "Width at least 90 cm": ">=",
         "Width more than 90 cm": ">",
+        "Width above 90 cm": ">",
+        "Width greater than 90 cm": ">",
+        "Width greater than or equal to 90 cm": ">=",
         "Width at most 90 cm": "<=",
         "Width less than 90 cm": "<",
+        "Width below 90 cm": "<",
+        "Width less than or equal to 90 cm": "<=",
         "Width exactly 90 cm": "=",
         "Width equal to 90 cm": "=",
     }
@@ -199,3 +204,14 @@ def test_short_unit_symbols_require_word_boundaries():
 def test_symbolic_comparisons_do_not_match_inside_other_tokens():
     assert classify_query("The width is < 90 cm") == "technical"
     assert classify_query("The table supports Trendelenburg") == "capability"
+
+
+def test_flow_rate_above_query_is_parsed_as_numeric_requirement():
+    query = "Show products with flow rate above 100 ml/hr"
+    requirement = parse_requirement(query)
+
+    assert requirement["attribute"] == "Flow Rate"
+    assert requirement["operator"] == ">"
+    assert requirement["value"] == 100
+    assert requirement["unit"] == "ml/hr"
+    assert requirement["query_type"] == "technical"

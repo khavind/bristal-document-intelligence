@@ -1,5 +1,7 @@
 import re
 
+from src.retrieval.unit_converter import UNIT_CATEGORIES, normalize_unit as normalize_comparable_unit
+
 
 # --------------------------------------------------
 # Unit Normalization
@@ -89,6 +91,16 @@ def normalize_unit(unit):
 
         "ml/hr": "ml/hr",
         "ml/h": "ml/hr",
+        "l/hr": "l/hr",
+        "l/h": "l/hr",
+        "milliliter/hour": "ml/hr",
+        "milliliters/hour": "ml/hr",
+        "millilitre/hour": "ml/hr",
+        "millilitres/hour": "ml/hr",
+        "liter/hour": "l/hr",
+        "liters/hour": "l/hr",
+        "litre/hour": "l/hr",
+        "litres/hour": "l/hr",
 
         "l/min": "L/min",
         "l/m": "L/min",
@@ -512,6 +524,8 @@ def parse_mixed(text):
     numeric_value = match.group(1)
     unit = match.group(2)
     description = match.group(3).strip()
+    if normalize_comparable_unit(unit) not in UNIT_CATEGORIES:
+        return None
 
     parsed_measurement = parse_scalar(
         f"{numeric_value} {unit}"

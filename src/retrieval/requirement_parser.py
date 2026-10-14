@@ -26,16 +26,20 @@ OPERATOR_PATTERNS = [
     (r"\bminimum\b", ">="),
     (r"\bor more\b", ">="),
     (r"\bnot less than\b", ">="),
+    (r"\bgreater than or equal to\b", ">="),
 
     (r"\bat most\b", "<="),
     (r"\bmaximum\b", "<="),
     (r"\bor less\b", "<="),
     (r"\bnot more than\b", "<="),
+    (r"\bless than or equal to\b", "<="),
 
     (r"\bmore than\b", ">"),
     (r"\bgreater than\b", ">"),
+    (r"\babove\b", ">"),
     (r"\bless than\b", "<"),
     (r"\bfewer than\b", "<"),
+    (r"\bbelow\b", "<"),
 
     (r">=", ">="),
     (r"<=", "<="),
@@ -63,7 +67,6 @@ ATTRIBUTE_ALIASES = {
     "load": "Load",
     "battery backup": "Battery Backup",
     "battery duration": "Battery Backup",
-    "battery": "Battery Backup",
     "backup": "Battery Backup",
     "trendelenburg": "Trendelenburg Positioning",
     "trendelenburg positioning": "Trendelenburg Positioning",
@@ -205,6 +208,7 @@ def find_value_and_unit(query):
         r"centimeters?|cm|millimeters?|mm|meters?|m|inches|inch|in|"
         r"millivolts?|mv|kilovolts?|kv|volts?|v|"
         r"megahertz|mhz|gigahertz|ghz|kilohertz|khz|hertz|hz|"
+        r"ml\s*/\s*(?:hr|h)|l\s*/\s*(?:hr|h)|"
         r"degrees?|deg|°|bpm|samples?/sec)"
         r"(?![a-z0-9]))?"
     )
@@ -251,6 +255,12 @@ def find_value_and_unit(query):
         unit = "bpm"
     elif unit == "samples/sec":
         unit = "samples/sec"
+    elif unit:
+        unit = re.sub(r"\s+", "", unit)
+        if unit in {"ml/hr", "ml/h"}:
+            unit = "ml/hr"
+        elif unit in {"l/hr", "l/h"}:
+            unit = "l/hr"
 
     return value, unit
 
@@ -348,7 +358,8 @@ def classify_query_intent(query):
 
     if re.search(
         r"\b(at least|at most|minimum|maximum|more than|greater than|"
-        r"less than|fewer than|or more|or less|exactly|equal to|equals to)\b|"
+        r"above|below|less than|fewer than|or more|or less|exactly|equal to|"
+        r"equals to|greater than or equal to|less than or equal to)\b|"
         r">=|<=|(?<![<>=])>(?!=)|(?<![<>=])<(?![=>])|(?<![<>=])=(?!=)",
         q,
     ):

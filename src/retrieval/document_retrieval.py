@@ -46,7 +46,7 @@ def retrieve_passages(
     document_frequency = Counter()
     for chunk in chunks:
         text = chunk.get("text") or ""
-        terms = _terms(text)
+        terms = _terms(f"{chunk.get('section') or ''}\n{text}")
         tokenized.append((chunk, terms))
         document_frequency.update(terms.keys())
 

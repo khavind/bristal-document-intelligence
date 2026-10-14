@@ -151,6 +151,41 @@ def test_feature_negative_evidence_requires_relevant_negation():
     assert product_matcher._feature_negation_matches("Battery backup is available during transport.", "underwater operation") is False
 
 
+def test_battery_duration_evidence_requires_a_function_usage_duration():
+    chunks = [
+        {
+            "document": "manual.pdf",
+            "page": 3,
+            "section": "Warnings",
+            "chunk_id": "alarm",
+            "text": "Two pulsing tone sequences repeat at intervals of several minutes. The batteries need to be charged.",
+        },
+        {
+            "document": "manual.pdf",
+            "page": 4,
+            "section": "Battery operation",
+            "chunk_id": "runtime",
+            "text": "If the batteries are fully charged, the electrical functions can be used for several days.",
+        },
+        {
+            "document": "manual.pdf",
+            "page": 5,
+            "section": "Battery operation",
+            "chunk_id": "switch-off",
+            "text": "In battery mode, the column automatically switches off after 8 hours.",
+        },
+    ]
+
+    evidence = product_matcher._find_battery_duration_evidence(
+        chunks, {"manual.pdf"}
+    )
+
+    assert [(item["page"], item["chunk_id"]) for item in evidence] == [
+        (4, "runtime")
+    ]
+    assert "electrical functions can be used for several days" in evidence[0]["evidence"]
+
+
 def test_width_requirement_ignores_unrelated_same_unit_attributes(monkeypatch):
     requirement = parse_requirement("The operating table should have a width of at least 90 cm")
     assert requirement["attribute"] == "Width"
