@@ -42,13 +42,26 @@ for pdf_path in pdf_files:
 
             page_blocks.append({
                 "bbox": [x0, y0, x1, y1],
-                "text": block_text.strip()
+                "text": block_text.strip(),
+                "block": block[5] if len(block) > 5 else None,
+            })
+
+        words = []
+        for word in page.get_text("words"):
+            x0, y0, x1, y1, word_text = word[:5]
+            words.append({
+                "bbox": [round(x0, 2), round(y0, 2), round(x1, 2), round(y1, 2)],
+                "text": word_text,
+                "block": word[5] if len(word) > 5 else None,
+                "line": word[6] if len(word) > 6 else None,
+                "word": word[7] if len(word) > 7 else None
             })
 
         pages.append({
             "page": page_number,
             "text": text,
-            "blocks": page_blocks
+            "blocks": page_blocks,
+            "words": words
         })
 
     document.close()

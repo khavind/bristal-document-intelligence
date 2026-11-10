@@ -12,6 +12,61 @@ TARGET_CHUNK_CHARS = 1500
 # Absolute maximum size before we force a split.
 MAX_CHUNK_CHARS = 2200
 
+# Words that indicate a real section title rather than a specification label.
+_HEADING_CONTEXT_WORDS = {
+    "additional",
+    "benefits",
+    "contents",
+    "data",
+    "description",
+    "feature",
+    "features",
+    "general",
+    "information",
+    "instructions",
+    "introduction",
+    "overview",
+    "specification",
+    "specifications",
+    "standard",
+    "summary",
+    "technical",
+    "warning",
+    "warnings",
+}
+
+# Measurement words that usually belong to attribute labels, not headings.
+_MEASUREMENT_LABEL_WORDS = {
+    "capacity",
+    "clearance",
+    "current",
+    "depth",
+    "diameter",
+    "frequency",
+    "height",
+    "length",
+    "load",
+    "pressure",
+    "range",
+    "speed",
+    "stroke",
+    "temperature",
+    "travel",
+    "voltage",
+    "weight",
+    "width",
+}
+
+
+def _looks_like_measurement_attribute_label(line):
+    """True for spec labels such as Safe Working Load, not section titles."""
+    words = re.findall(r"[a-zA-Z]+", line.lower())
+    if not words:
+        return False
+    if any(word in _HEADING_CONTEXT_WORDS for word in words):
+        return False
+    return any(word in _MEASUREMENT_LABEL_WORDS for word in words)
+
 
 def looks_like_heading(line):
     """
@@ -38,6 +93,21 @@ def looks_like_heading(line):
     if re.search(r"\d{3,}", line) and "specification" not in line.lower():
         return False
 
+    words = line.split()
+
+    # Sentence-case two-word section names such as "Bed angles".
+    if (
+        len(words) == 2
+        and words[0][:1].isupper()
+        and words[1].islower()
+        and words[1].endswith("s")
+    ):
+        return True
+
+    # Title-case or all-caps measurement labels are attributes, not headings.
+    if _looks_like_measurement_attribute_label(line):
+        return False
+
     # Strong signal: uppercase heading.
     letters = [c for c in line if c.isalpha()]
 
@@ -48,16 +118,6 @@ def looks_like_heading(line):
             return True
 
     # Another useful signal: title-style heading.
-    words = line.split()
-
-    if (
-        len(words) == 2
-        and words[0][:1].isupper()
-        and words[1].islower()
-        and words[1].endswith("s")
-    ):
-        return True
-
     if 1 <= len(words) <= 8:
         capitalized_words = sum(
             1 for word in words
@@ -70,7 +130,16 @@ def looks_like_heading(line):
     return False
 
 
-def save_chunk(chunks, chunk_id, document, page, section, lines, layout=None):
+def save_chunk(
+    chunks,
+    chunk_id,
+    document,
+    page,
+    section,
+    lines,
+    layout=None,
+    section_context=None,
+):
     """
     Save one chunk if it contains meaningful text.
     """
@@ -94,7 +163,37 @@ def save_chunk(chunks, chunk_id, document, page, section, lines, layout=None):
     }
 
     if layout is not None:
-        chunk["layout"] = layout
+        chunk_layout = dict(layout)
+        blocks = chunk_layout.get("blocks") or []
+        block_ids = {
+            block.get("block")
+            for block in blocks
+            if isinstance(block, dict) and block.get("block") is not None
+        }
+        if block_ids:
+            line_keys = {
+                re.sub(r"\s+", " ", line).strip().casefold()
+                for line in cleaned_lines
+            }
+            relevant_blocks = {
+                block["block"]
+                for block in blocks
+                if isinstance(block, dict) and block.get("block") in block_ids
+                and any(
+                    re.sub(r"\s+", " ", block_line).strip().casefold()
+                    in line_keys
+                    for block_line in str(block.get("text") or "").splitlines()
+                    if block_line.strip()
+                )
+            }
+            chunk_layout["words"] = [
+                word
+                for word in chunk_layout.get("words", [])
+                if isinstance(word, dict) and word.get("block") in relevant_blocks
+            ]
+        if section_context:
+            chunk_layout["section_context"] = section_context
+        chunk["layout"] = chunk_layout
 
     chunks.append(chunk)
 
@@ -124,6 +223,7 @@ def chunk_page(page_number, page_text, document, chunk_id, page_data=None):
 
     current_lines = []
     current_section = None
+    section_context = None
     layout = None
 
     if isinstance(page_data, dict):
@@ -131,6 +231,7 @@ def chunk_page(page_number, page_text, document, chunk_id, page_data=None):
             "page_width": page_data.get("width") or page_data.get("page_width"),
             "page_height": page_data.get("height") or page_data.get("page_height"),
             "blocks": page_data.get("blocks", []),
+            "words": page_data.get("words", []),
         }
 
     for line in lines:
@@ -147,8 +248,22 @@ def chunk_page(page_number, page_text, document, chunk_id, page_data=None):
                     current_section,
                     current_lines,
                     layout=layout,
+                    section_context=section_context,
                 )
                 current_lines = []
+
+            normalized_heading = line.casefold()
+            letters = [char for char in line if char.isalpha()]
+            uppercase_ratio = (
+                sum(char.isupper() for char in letters) / len(letters)
+                if letters
+                else 0
+            )
+            if "technical" in normalized_heading and "specification" in normalized_heading:
+                section_context = line
+            elif uppercase_ratio > 0.75:
+                section_context = None
+
             current_section = line
 
         current_lines.append(line)
@@ -166,6 +281,7 @@ def chunk_page(page_number, page_text, document, chunk_id, page_data=None):
                 current_section,
                 current_lines,
                 layout=layout,
+                section_context=section_context,
             )
 
             current_lines = []
@@ -181,6 +297,7 @@ def chunk_page(page_number, page_text, document, chunk_id, page_data=None):
                 current_section,
                 current_lines,
                 layout=layout,
+                section_context=section_context,
             )
 
             current_lines = []
@@ -196,7 +313,12 @@ def chunk_page(page_number, page_text, document, chunk_id, page_data=None):
             current_section,
             current_lines,
             layout=layout,
+            section_context=section_context,
         )
+
+    page_tables = page_data.get("tables", []) if isinstance(page_data, dict) else []
+    if page_tables and chunks:
+        chunks[0]["layout"]["tables"] = page_tables
 
     return chunks, chunk_id
 

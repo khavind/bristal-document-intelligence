@@ -1,4 +1,5 @@
 import json
+import re
 from pathlib import Path
 
 import pymupdf
@@ -44,7 +45,8 @@ def extract_page_data(page, page_number):
                 round(x1, 2),
                 round(y1, 2)
             ],
-            "text": block_text.strip()
+            "text": block_text.strip(),
+            "block": block[5] if len(block) > 5 else None,
         })
 
 
@@ -104,12 +106,35 @@ def extract_page_data(page, page_number):
         "height": round(rect.height, 2)
     }
 
+    normalized_text = re.sub(r"\s+", "", text).casefold()
+    tables = []
+    if all(
+        marker in normalized_text
+        for marker in (
+            "operatingtabletopequipment",
+            "orientation",
+            "weight",
+            "restriction",
+            "chapter",
+        )
+    ):
+        for table in page.find_tables().tables:
+            cells = table.extract()
+            if not cells:
+                continue
+            header = " ".join(str(cell or "") for cell in cells[0]).casefold()
+            normalized_header = re.sub(r"\s+", "", header)
+            if all(
+                marker in normalized_header
+                for marker in ("orientation", "weight", "restriction", "chapter")
+            ):
+                tables.append({"cells": cells})
 
     # ---------------------------------------------------------
     # 5. Return complete page representation
     # ---------------------------------------------------------
 
-    return {
+    page_data = {
         "page": page_number,
         "width": page_size["width"],
         "height": page_size["height"],
@@ -117,6 +142,9 @@ def extract_page_data(page, page_number):
         "blocks": page_blocks,
         "words": page_words
     }
+    if tables:
+        page_data["tables"] = tables
+    return page_data
 
 
 def extract_pdf(pdf_path):

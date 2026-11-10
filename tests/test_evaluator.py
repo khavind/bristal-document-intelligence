@@ -86,6 +86,36 @@ def test_all_comparison_operators_keep_inclusive_and_exclusive_boundaries():
         assert evaluate_requirement(parse_requirement(query), "90 cm", "Width") == expected
 
 
+def test_component_mismatch_and_unspecified_component_are_unknown():
+    bed_requirement = parse_requirement(
+        "Maximum Lift Capacity for Bed at least 200 kg"
+    )
+    wrong_component = {
+        "attribute": "Maximum Lift Capacity",
+        "component": "Foot section",
+        "raw_value": "500 lbs",
+    }
+    assert evaluate_requirement(
+        bed_requirement,
+        "500 lbs",
+        candidate=wrong_component,
+    ) == "UNKNOWN"
+
+    generic_requirement = parse_requirement(
+        "Maximum Lift Capacity at least 200 kg"
+    )
+    component_evidence = {
+        "attribute": "Maximum Lift Capacity",
+        "component": "Bed",
+        "raw_value": "500 lbs",
+    }
+    assert evaluate_requirement(
+        generic_requirement,
+        "500 lbs",
+        candidate=component_evidence,
+    ) == "UNKNOWN"
+
+
 def test_natural_language_operator_boundaries_are_evaluated_correctly():
     queries = [
         ("Width at least 90 cm", "PASS"),

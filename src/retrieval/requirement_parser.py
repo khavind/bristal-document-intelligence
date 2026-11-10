@@ -55,6 +55,7 @@ OPERATOR_PATTERNS = [
 # ---------------------------------------------------------
 
 ATTRIBUTE_ALIASES = {
+    "maximum lift capacity": "Maximum Lift Capacity",
     "safe working load": "Safe Working Load",
     "safe work load": "Safe Working Load",
     "working load": "Safe Working Load",
@@ -62,6 +63,9 @@ ATTRIBUTE_ALIASES = {
     "patient load": "Patient Load",
     "maximum patient weight": "Maximum Patient Weight",
     "patient weight": "Maximum Patient Weight",
+    "permissible patient weight": "Permissible Load",
+    "permissible patient load": "Permissible Load",
+    "permissible load": "Permissible Load",
     "maximum load": "Maximum Load",
     "operating table load": "Load",
     "load": "Load",
@@ -162,6 +166,324 @@ def attributes_equivalent(left, right):
     return bool(left_normalized and right_normalized and left_normalized == right_normalized)
 
 
+def normalize_component(value):
+    """Normalize whitespace and case without inferring component synonyms."""
+    return re.sub(r"\s+", " ", str(value or "")).strip().casefold()
+
+
+def find_component(query):
+    """Find an explicitly named component adjacent to a supported load attribute."""
+    text = normalize_query(query)
+    quantity = r"(?:maximum\s+lift\s+capacity|maximum\s+patient\s+weight)"
+    patterns = (
+        rf"\b{quantity}\s+(?:for|of)\s+(?:the\s+)?"
+        r"(bed|foot\s+section)\b",
+        rf"\b{quantity}\s*[-:]\s*"
+        r"(bed|foot\s+section)\b",
+        rf"\b(bed|foot\s+section)\s+{quantity}\b",
+    )
+    for pattern in patterns:
+        match = re.search(pattern, text, re.IGNORECASE)
+        if match:
+            component = match.group(1)
+            return "Foot section" if normalize_component(component) == "foot section" else "Bed"
+    return None
+
+
+def find_configuration_scope(query):
+    """Return only explicit PST-style configuration qualifiers in a requirement."""
+    text = normalize_query(query)
+    configuration_terms = []
+    for pattern, label in (
+        (r"\bcarbon\s*1200\b", "Carbon 1200"),
+        (r"\bcarbon\s*600\b", "Carbon 600"),
+        (r"\bseat\s+section\s+extension\b", "Seat section extension"),
+        (r"\buniversal\s+plate\b", "Universal plate"),
+        (r"\bextension\s+unit\b", "Extension unit"),
+        (r"\bshoulder\s+chair\b", "Shoulder chair"),
+        (r"\bleg\s+section\b", "Leg section"),
+        (r"\bhead\s+section\b", "Head section"),
+    ):
+        if re.search(pattern, text, re.IGNORECASE):
+            configuration_terms.append(label)
+
+    orientation_match = re.search(
+        r"\b(normal|inverted)(?:\s+patient)?(?:\s+orientation)?\b",
+        text,
+        re.IGNORECASE,
+    )
+    orientation = (
+        orientation_match.group(1).capitalize()
+        if orientation_match
+        else None
+    )
+    chapter_match = re.search(
+        r"\b(5\s*\.\s*11\s*\.\s*\d+)(?:\s*\(\s*(\d+)\s*\))?",
+        text,
+        re.IGNORECASE,
+    )
+    chapter = None
+    if chapter_match:
+        chapter = re.sub(r"\s+", "", chapter_match.group(1))
+        if chapter_match.group(2):
+            chapter = f"{chapter} ({chapter_match.group(2)})"
+    item_numbers = [
+        int(match.group(1))
+        for match in re.finditer(
+            r"\b(?:item\s*)?\[\s*(\d+)\s*\]",
+            text,
+            re.IGNORECASE,
+        )
+    ]
+    position_match = re.search(r"\b(pushed in|pulled out)\b", text, re.IGNORECASE)
+    position_terms = [position_match.group(1).casefold()] if position_match else []
+
+    if not any(
+        (configuration_terms, orientation, chapter, item_numbers, position_terms)
+    ):
+        return None
+
+    return {
+        "configuration_terms": configuration_terms,
+        "orientation": orientation,
+        "chapter": chapter,
+        "item_numbers": item_numbers,
+        "position_terms": position_terms,
+    }
+
+
+def _inclination_operator(modifier):
+    for symbol, operator in (
+        (">=", ">="),
+        ("<=", "<="),
+        ("≥", ">="),
+        ("≤", "<="),
+        (">", ">"),
+        ("<", "<"),
+        ("=", "="),
+    ):
+        if symbol in modifier:
+            return operator
+
+    patterns = (
+        (r"(?:greater than or equal to|at least|not less than|above)", ">="),
+        (r"(?:less than or equal to|no greater than|not greater than|"
+         r"no more than|not more than|at most|up to)", "<="),
+        (r"(?:greater than|more than|exceeds)", ">"),
+        (r"(?:less than|below|under)", "<"),
+        (r"(?:equal to|equals?|exactly)", "="),
+    )
+    for pattern, operator in patterns:
+        if re.search(rf"(?<!\w){pattern}(?!\w)", modifier, re.IGNORECASE):
+            return operator
+    return "="
+
+
+def _inclination_condition(query):
+    pattern = re.compile(
+        r"\b(?:inclination|tilt(?:ed|ing)?|inclined|angle)\b"
+        r"(?P<modifier>[^.;,]{0,60}?)"
+        r"(?P<value>\d+(?:\.\d+)?)\s*(?:degrees?|deg|°|�)(?![a-z])",
+        re.IGNORECASE,
+    )
+    match = pattern.search(query)
+    if not match:
+        pattern = re.compile(
+            r"(?P<modifier>(?:>=|<=|>|<|=|≥|≤|"
+            r"at\s+least|at\s+most|no\s+more\s+than|"
+            r"no\s+less\s+than|at)?\s*)"
+            r"(?P<value>\d+(?:\.\d+)?)\s*(?:degrees?|deg|°|�)(?![a-z])",
+            re.IGNORECASE,
+        )
+        match = pattern.search(query)
+    if not match:
+        return None
+    return {
+        "operator": _inclination_operator(match.group("modifier")),
+        "value": float(match.group("value")),
+        "unit": "degrees",
+    }
+
+
+def find_condition_scope(query):
+    """Return explicit operating conditions, marking unrecognized conditions."""
+    text = normalize_query(query)
+    conditions = {}
+    lower = text.casefold()
+
+    unrestricted_functions = bool(
+        re.search(
+            r"\b(?:without\s+(?:limiting|restricting)\s+"
+            r"(?:the\s+)?(?:operating\s+table\s+)?functions?|"
+            r"no\s+(?:limits?|restrictions?)\s+(?:on|to)\s+"
+            r"(?:the\s+)?(?:operating\s+table\s+)?functions?|"
+            r"unrestricted\s+(?:operating\s+table\s+)?functions?|"
+            r"all\s+(?:operating\s+table\s+)?functions?\s+available)\b",
+            lower,
+        )
+    )
+    unrestricted_operation = bool(
+        re.search(
+            r"\b(?:unrestricted|unlimited)\s+operation\b|"
+            r"\bwithout\s+(?:limiting|restricting)\s+(?:the\s+)?operation\b|"
+            r"\bno\s+(?:limits?|restrictions?)\s+(?:on|to)\s+operation\b",
+            lower,
+        )
+    )
+    if unrestricted_functions or unrestricted_operation:
+        conditions["function_restriction"] = "none"
+        conditions["restriction"] = "none"
+    elif re.search(
+        r"\b(?:without\s+(?:any\s+)?restrictions?|no\s+restrictions?|"
+        r"unrestricted|without\s+limits?)\b",
+        lower,
+    ):
+        conditions["restriction"] = "none"
+    elif re.search(
+        r"\b(?:without\s+(?:any\s+)?travel\s+restrictions?|"
+        r"no\s+travel\s+restrictions?)\b",
+        lower,
+    ):
+        conditions["travel_restriction"] = "none"
+
+    if re.search(r"\b(?:reverse\s+)?trendelenburg(?:\s+position)?\b", lower):
+        conditions["position"] = (
+            "reverse_trendelenburg"
+            if re.search(r"\breverse\s+trendelenburg\b", lower)
+            else "trendelenburg"
+        )
+
+    if re.search(r"\b(?:unevenly|uneven|non[- ]uniformly)\s+loaded\b", lower):
+        conditions["load_distribution"] = "uneven"
+    elif re.search(r"\bevenly\s+loaded\b", lower):
+        conditions["load_distribution"] = "even"
+
+    inclination = _inclination_condition(lower)
+    if inclination:
+        conditions["inclination"] = inclination
+
+    travel_or_tabletop = (
+        r"\b(?:(?:longitudinal\s+)?travel|"
+        r"(?:operating\s+)?tabletop|operating\s+table)\b"
+    )
+    negative_level_travel = re.search(
+        r"\b(?:non[\s-]*level|not[\s-]+level)\b.{0,35}"
+        + travel_or_tabletop
+        + r"|"
+        + travel_or_tabletop
+        + r".{0,50}\b(?:not|never|cannot|can't)\b"
+        r".{0,20}\blevel\b|"
+        + travel_or_tabletop
+        + r".{0,50}\b(?:must|shall|should)\s+not\b"
+        r".{0,20}\blevel\b|"
+        + travel_or_tabletop
+        + r".{0,30}\bnon[\s-]*level\b",
+        lower,
+    )
+    positive_level_travel = re.search(
+        r"\blevel\b.{0,35}"
+        + travel_or_tabletop
+        + r"|"
+        + travel_or_tabletop
+        + r".{0,50}\blevel\b",
+        lower,
+    )
+    inclined_travel = re.search(
+        r"\binclined\s+(?:(?:longitudinal\s+)?travel|tabletop)\b|"
+        + travel_or_tabletop
+        + r".{0,35}\binclined\b",
+        lower,
+    )
+    if negative_level_travel:
+        conditions["longitudinal_travel"] = "not_level"
+    elif positive_level_travel:
+        conditions["longitudinal_travel"] = "level"
+    elif inclined_travel:
+        conditions["longitudinal_travel"] = "not_level"
+
+    unsupported_condition = bool(
+        re.search(r"\baccessor(?:y|ies)\b", lower)
+        or (
+            re.search(
+                r"\b(?:supine|prone|side[\s-]*lying|lateral\s+decubitus|"
+                r"lithotomy|fowler(?:'s)?|jackknife|beach\s+chair)\b",
+                lower,
+            )
+            and "position" not in conditions
+        )
+        or (
+            re.search(r"\b(?:incline|slope|sloped)\b", lower)
+            and not inclination
+            and not inclined_travel
+        )
+        or (
+            re.search(r"\b(?:tilt\w*|inclination|angle)\b", lower)
+            and not inclination
+        )
+        or (
+            re.search(r"\binclined\b", lower)
+            and not inclination
+            and not inclined_travel
+        )
+        or (
+            re.search(r"\btravel\b", lower)
+            and not any(
+                key in conditions
+                for key in ("travel_restriction", "longitudinal_travel")
+            )
+        )
+        or (
+            re.search(
+                r"\b(?:restriction\w*|restricted|unrestricted|limiting|limited)\b",
+                lower,
+            )
+            and not any(
+                key in conditions
+                for key in (
+                    "restriction",
+                    "travel_restriction",
+                    "function_restriction",
+                )
+            )
+        )
+        or (
+            re.search(r"\bfunction\w*|\boperation\b", lower)
+            and "function_restriction" not in conditions
+        )
+        or (
+            re.search(r"\bloaded\b|\bload distribution\b", lower)
+            and "load_distribution" not in conditions
+        )
+        or (
+            re.search(
+                r"\b(?:tabletop|operating table)\b.{0,35}"
+                r"\b(?:flat|horizontal|inclined|level|sloped|tilted|vertical)\b|"
+                r"\b(?:flat|horizontal|inclined|level|non[- ]level|sloped|"
+                r"tilted|vertical)\b.{0,35}\b(?:tabletop|operating table)\b",
+                lower,
+            )
+            and "longitudinal_travel" not in conditions
+        )
+        or (
+            re.search(r"\bposition\b", lower)
+            and "position" not in conditions
+            and not re.search(
+                r"\bhead\s+positioning\s+extension\b.{0,30}\b(?:pushed in|pulled out)\b",
+                lower,
+            )
+        )
+        or re.search(
+            r"\b(?:only if|subject to|provided that|under the condition|"
+            r"head[- ]down|foot[- ]down)\b",
+            lower,
+        )
+    )
+    if unsupported_condition:
+        conditions["unsupported"] = True
+
+    return conditions or None
+
+
 def find_attribute(query):
     text = _normalize_attribute_text(query)
 
@@ -188,6 +510,28 @@ def _find_operator(query):
         if match:
             return operator, match
     return None, None
+
+
+def _find_requirement_operator(query, attribute):
+    if normalize_attribute(attribute) != "permissible load":
+        return _find_operator(query)
+
+    matches = {}
+    query_lower = query.lower()
+    for pattern, operator in OPERATOR_PATTERNS:
+        for match in re.finditer(pattern, query_lower):
+            matches.setdefault(match.span(), (operator, match))
+
+    weight_units = {"kg", "g", "lb", "lbs"}
+    weight_matches = []
+    for operator, match in matches.values():
+        _, unit = find_value_and_unit(query[match.end():])
+        if unit and unit.casefold() in weight_units:
+            weight_matches.append((operator, match))
+
+    if not weight_matches:
+        return None, None
+    return max(weight_matches, key=lambda item: item[1].start())
 
 
 def find_operator(query):
@@ -411,8 +755,11 @@ def is_capability_requirement(query):
 def parse_requirement(query):
 
     attribute = find_attribute(query)
+    component = find_component(query)
+    configuration_scope = find_configuration_scope(query)
+    condition_scope = find_condition_scope(query)
 
-    operator, operator_match = _find_operator(query)
+    operator, operator_match = _find_requirement_operator(query, attribute)
 
     value_text = query[operator_match.end():] if operator_match else query
     value, unit = find_value_and_unit(value_text)
@@ -428,6 +775,9 @@ def parse_requirement(query):
     return {
         "original_query": query,
         "attribute": attribute,
+        "component": component,
+        "configuration_scope": configuration_scope,
+        "condition_scope": condition_scope,
         "operator": operator,
         "value": value,
         "unit": unit,

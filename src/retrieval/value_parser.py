@@ -505,8 +505,8 @@ def parse_mixed(text):
     pattern = (
         r"^\s*"
         r"([+-]?\d[\d,]*(?:\.\d+)?)"
-        r"\s+"
-        r"([a-zA-Z%°]+(?:\s*/\s*[a-zA-Z]+)?)"
+        r"\s*"
+        r"([a-zA-Z%°]+(?:\s*/\s*[a-zA-Z]+)?|[\"″])"
         r"\s+"
         r"(.+?)"
         r"\s*$"
@@ -523,6 +523,8 @@ def parse_mixed(text):
 
     numeric_value = match.group(1)
     unit = match.group(2)
+    if unit in {'"', "″"}:
+        unit = "inch"
     description = match.group(3).strip()
     if normalize_comparable_unit(unit) not in UNIT_CATEGORIES:
         return None

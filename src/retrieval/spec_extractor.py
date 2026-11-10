@@ -1,5 +1,6 @@
 import json
 import re
+from collections import Counter
 from pathlib import Path
 
 try:
@@ -195,6 +196,51 @@ GENERIC_METADATA_WORDS = {
 
 PARENTHETIC_UNIT_RE = re.compile(r"^\([^)]*\)$|^\[[^\]]+\]$", re.IGNORECASE)
 
+# Quantity labels whose genuine values are measurements, not nested row names.
+QUANTITY_ATTRIBUTE_TERMS = {
+    "capacity",
+    "current",
+    "depth",
+    "diameter",
+    "frequency",
+    "height",
+    "length",
+    "load",
+    "pressure",
+    "size",
+    "speed",
+    "temperature",
+    "voltage",
+    "weight",
+    "width",
+}
+
+# Whole-word categorical states that remain valid even under quantity labels.
+CATEGORICAL_STATE_TERMS = {
+    "automatic",
+    "battery",
+    "bilateral",
+    "carbon",
+    "cordless",
+    "corded",
+    "double",
+    "electric",
+    "electronic",
+    "fixed",
+    "hydraulic",
+    "integrated",
+    "manual",
+    "mobile",
+    "optional",
+    "rechargeable",
+    "remote",
+    "sensor",
+    "standard",
+    "stainless",
+    "wired",
+    "wireless",
+}
+
 
 # Technical words that commonly occur in real product specifications.
 TECHNICAL_TERMS = {
@@ -308,6 +354,10 @@ def add_specification(
     chunk,
     status=None,
     parent_attribute=None,
+    component=None,
+    scope=None,
+    source_evidence=None,
+    source_section=None,
 ):
     """
     Add one structured specification.
@@ -324,12 +374,26 @@ def add_specification(
         "status": status,
         "source": create_source(
             chunk,
-            evidence=f"{attribute}\n{raw_value}",
+            evidence=(
+                source_evidence
+                if source_evidence is not None
+                else f"{attribute}\n{raw_value}"
+            ),
         ),
     }
 
+    if source_section is not None:
+        specification["source"]["section"] = source_section
+
+    if scope:
+        specification["scope"] = dict(scope)
+        specification["source"]["scope"] = dict(scope)
+
     if parent_attribute:
         specification["parent_attribute"] = parent_attribute
+
+    if component:
+        specification["component"] = component
 
     specifications.append(specification)
 
@@ -808,6 +872,43 @@ def assess_layout_relationship(chunk, attribute, raw_value):
     return True
 
 
+def has_quantity_attribute_term(attribute):
+    """True when the attribute names a measurable quantity rather than a type or mode."""
+    words = re.findall(r"[a-zA-Z]+", clean_line(attribute).lower())
+    return any(word in QUANTITY_ATTRIBUTE_TERMS for word in words)
+
+
+def looks_like_nested_row_label(raw_value, parsed_value):
+    """
+    Detect component/row headers nested under a parent quantity heading.
+
+    Example: "Bed" or "Foot section" under "Maximum Lift Capacity".
+    Genuine categorical states such as "electric" or "rechargeable" are kept.
+    """
+    if not isinstance(parsed_value, dict) or parsed_value.get("type") != "categorical":
+        return False
+
+    text = clean_line(raw_value)
+    if not text or any(char.isdigit() for char in text):
+        return False
+
+    words = re.findall(r"[a-zA-Z]+", text.lower())
+    if not words or len(words) > 3:
+        return False
+
+    if any(word in CATEGORICAL_STATE_TERMS for word in words):
+        return False
+
+    return is_likely_attribute(text)
+
+
+def _is_quantity_attribute_with_nested_row_label(attribute, raw_value, parsed_value):
+    return has_quantity_attribute_term(attribute) and looks_like_nested_row_label(
+        raw_value,
+        parsed_value,
+    )
+
+
 def is_valid_attribute_value_pair(attribute, raw_value, parsed_value, chunk=None):
     """
     Final validation for an attribute/value pair.
@@ -825,6 +926,9 @@ def is_valid_attribute_value_pair(attribute, raw_value, parsed_value, chunk=None
     raw_value = clean_line(raw_value)
 
     if not attribute or not raw_value:
+        return False
+
+    if re.search(r"/\s*$", raw_value):
         return False
 
     bullet_prefixes = tuple(f"{marker} " for marker in MARKERS)
@@ -850,6 +954,9 @@ def is_valid_attribute_value_pair(attribute, raw_value, parsed_value, chunk=None
         return False
 
     if not is_likely_technical_value(raw_value, parsed_value):
+        return False
+
+    if _is_quantity_attribute_with_nested_row_label(attribute, raw_value, parsed_value):
         return False
 
     if (
@@ -925,6 +1032,623 @@ def merge_wrapped_bullet_lines(lines):
         i += 1
 
     return merged
+
+
+_LAYOUT_BASELINE_TOLERANCE = 2.5
+_LAYOUT_COLUMN_GAP = 24
+_NESTED_QUANTITY_LABEL = "maximum lift capacity"
+_NESTED_COMPONENT_LABELS = {"bed", "foot section"}
+_PATIENT_WEIGHT_HEADING = "maximum patient weight"
+_PATIENT_WEIGHT_ROW_RE = re.compile(
+    r"^(?P<raw_value>\d[\d,]*(?:\.\d+)?\s*(?:lbs?|kgs?))\s+"
+    r"(?P<component>bed|foot\s+section)\s+patient\s+weight\s+limit\.?$",
+    re.IGNORECASE,
+)
+
+
+def _extract_component_patient_weight_specifications(chunk):
+    """Extract explicitly qualified patient-weight rows below their heading."""
+    text_lines = [
+        _normalize_extracted_line(line)
+        for line in (chunk.get("text") or "").splitlines()
+        if clean_line(line)
+    ]
+    heading_index = next(
+        (
+            index
+            for index, line in enumerate(text_lines)
+            if _line_key(line) == _PATIENT_WEIGHT_HEADING
+        ),
+        None,
+    )
+    if heading_index is None:
+        return [], Counter()
+
+    suppressed = Counter({_line_key(text_lines[heading_index]): 1})
+    textual_rows = []
+    for line in text_lines[heading_index + 1:]:
+        match = _PATIENT_WEIGHT_ROW_RE.fullmatch(line)
+        if match:
+            suppressed[_line_key(line)] += 1
+            textual_rows.append((line, match))
+
+    layout = chunk.get("layout") or {}
+    words = layout.get("words") or []
+    if not words:
+        return [], suppressed
+
+    visual_lines = [
+        line
+        for lines in _layout_lines_by_block(words).values()
+        for line in lines
+    ]
+    heading_lines = [
+        line
+        for line in visual_lines
+        if _line_key(line["text"]) == _PATIENT_WEIGHT_HEADING
+    ]
+    if len(heading_lines) != 1 or not textual_rows:
+        return [], suppressed
+
+    heading = heading_lines[0]
+    heading_word = heading["words"][0]
+    heading_y = (heading_word["y0"] + heading_word["y1"]) / 2
+    heading_x = heading_word["x0"]
+    aligned_rows = []
+    for line in visual_lines:
+        match = _PATIENT_WEIGHT_ROW_RE.fullmatch(line["text"])
+        if not match:
+            continue
+        first_word = line["words"][0]
+        baseline = (first_word["y0"] + first_word["y1"]) / 2
+        if (
+            0 < baseline - heading_y <= 38
+            and abs(first_word["x0"] - heading_x) <= 18
+        ):
+            aligned_rows.append((line["text"], match))
+
+    components = [
+        match.group("component").casefold()
+        for _, match in aligned_rows
+    ]
+    if (
+        len(aligned_rows) != len(textual_rows)
+        or len(components) != len(set(components))
+    ):
+        return [], suppressed
+
+    specifications = []
+    heading_text = heading["text"]
+    section = heading_text
+    for line_text, match in aligned_rows:
+        component = "Foot section" if "foot" in match.group("component").casefold() else "Bed"
+        raw_value = re.sub(r"\s+", " ", match.group("raw_value")).strip()
+        parsed_value = parse_value(raw_value)
+        if not is_valid_attribute_value_pair(
+            "Maximum Patient Weight",
+            raw_value,
+            parsed_value,
+            chunk=None,
+        ):
+            continue
+        add_specification(
+            specifications,
+            "Maximum Patient Weight",
+            raw_value,
+            chunk,
+            component=component,
+            source_evidence=f"{heading_text}\n{line_text}",
+            source_section=section,
+        )
+
+    return specifications, suppressed
+
+
+def _layout_lines_by_block(words):
+    """Group positioned words into visual baselines without trusting line IDs."""
+    words_by_block = {}
+    for word in words:
+        bbox = word.get("bbox")
+        block = word.get("block")
+        if (
+            block is None
+            or not isinstance(bbox, (list, tuple))
+            or len(bbox) != 4
+            or not word.get("text")
+        ):
+            continue
+        try:
+            x0, y0, x1, y1 = (float(value) for value in bbox)
+        except (TypeError, ValueError):
+            continue
+        if x1 <= x0 or y1 <= y0:
+            continue
+        words_by_block.setdefault(block, []).append(
+            {
+                "x0": x0,
+                "y0": y0,
+                "x1": x1,
+                "y1": y1,
+                "text": str(word["text"]),
+            }
+        )
+
+    block_lines = {}
+    for block, block_words in words_by_block.items():
+        block_words.sort(key=lambda word: ((word["y0"] + word["y1"]) / 2, word["x0"]))
+        baselines = []
+        for word in block_words:
+            center_y = (word["y0"] + word["y1"]) / 2
+            if (
+                not baselines
+                or abs(center_y - baselines[-1]["baseline"])
+                > _LAYOUT_BASELINE_TOLERANCE
+            ):
+                baselines.append({"baseline": center_y, "words": [word]})
+            else:
+                baseline = baselines[-1]
+                baseline["words"].append(word)
+                baseline["baseline"] = sum(
+                    (item["y0"] + item["y1"]) / 2
+                    for item in baseline["words"]
+                ) / len(baseline["words"])
+
+        block_lines[block] = []
+        for baseline in baselines:
+            line_words = sorted(baseline["words"], key=lambda word: word["x0"])
+            block_lines[block].append(
+                {
+                    "words": line_words,
+                    "text": " ".join(word["text"] for word in line_words),
+                }
+            )
+
+    return block_lines
+
+
+def _split_layout_row(line):
+    """Split a visual row at a clear horizontal gap between table columns."""
+    words = line["words"]
+    gaps = [
+        (words[index + 1]["x0"] - word["x1"], index + 1)
+        for index, word in enumerate(words[:-1])
+    ]
+    if not gaps:
+        return None
+
+    gap, split_index = max(gaps)
+    if gap < _LAYOUT_COLUMN_GAP:
+        return None
+
+    left = " ".join(word["text"] for word in words[:split_index]).strip()
+    right = " ".join(word["text"] for word in words[split_index:]).strip()
+    if not left or not right:
+        return None
+    return left, right
+
+
+_PST_CHAPTER_TITLES = {
+    "5.11.2": "Operating tabletop with head section and leg section",
+    "5.11.3": "Operating tabletop with seat section extension and leg section",
+    "5.11.4": "Operating tabletop with universal plate and head section",
+    "5.11.5": "Operating tabletop with Carbon 1200 tabletop section",
+    "5.11.6": "Operating tabletop with Carbon 600 tabletop section",
+    "5.11.7": "Operating tabletop with extension unit",
+    "5.11.8": "Operating tabletop with shoulder chair",
+}
+
+_PST_GENERAL_LOAD_EVIDENCE = (
+    "The operating table is approved for a maximum patient weight of "
+    "454 kg / 1,000 lbs. The maximum load on the operating table may only "
+    "be applied, if the conditions in chapter 5.11 are met. Consult Trumpf "
+    "Medizin Systeme regarding the permissible load in any configuration "
+    "of the operating table other than that described in these instructions "
+    "for use. The load comprises the weight of the patient and the net weight "
+    "of the accessories. An additional accessory on the operating tabletop "
+    "therefore reduces the permissible patient weight. The net weight of "
+    "the accessory must be deducted from the permissible patient weight."
+)
+_PST_EVEN_SURFACE_EVIDENCE = (
+    "The maximum patient weight applies for an evenly loaded operating "
+    "tabletop (surface load)."
+)
+_PST_ACCESSORY_EVIDENCE = (
+    "Attention: Additional accessories on the operating table reduce "
+    "the permissible patient weight."
+)
+
+_PST_LOAD_QUALIFICATIONS = {
+    ("5.11.2 (1)", "Normal", "454 kg / 1000 lbs"): (
+        46,
+        "Patient weights of up to 454 kg / 1000 lbs are permitted under "
+        "the following conditions: 1. The longitudinal travel of the "
+        "operating tabletop must be in the level position. 2. The "
+        "operating tabletop must be inclined by no more than 15° around "
+        "the lateral and longitudinal axis. The tilt function stops "
+        "automatically at 15° and must not be tilted beyond this.",
+    ),
+    ("5.11.2 (2)", "Normal", "360 kg / 793 lbs"): (
+        47,
+        "Patient weights of up to 360 kg / 793 lbs are possible without "
+        "limiting the operating table functions.",
+    ),
+    ("5.11.3", "Normal", "300 kg / 661 lbs"): (
+        47,
+        "Patient weights of up to 300 kg / 661 lbs are possible without "
+        "limiting the operating table functions.",
+    ),
+    ("5.11.4", "Inverted", "270 kg / 595 lbs"): (
+        48,
+        "Patient weights of up to 270 kg / 595 lbs are possible without "
+        "limiting the operating table functions.",
+    ),
+    ("5.11.5", "Normal", "160 kg / 352 lbs"): (
+        48,
+        "Patient weights of up to 160 kg / 352 lbs are possible in the "
+        "normal patient orientation. Normal patient orientation is active "
+        "on the operating table. Longitudinal travel of the operating "
+        "tabletop towards the foot end of the patient is restricted by "
+        "100 mm.",
+    ),
+    ("5.11.5", "Inverted", "135 kg / 297 lbs"): (
+        48,
+        "Patient weights of up to 135 kg / 297 lbs are possible in the "
+        "inverted patient orientation. The patient orientation on the "
+        "operating table is switched to inverted. Longitudinal travel of "
+        "the operating tabletop towards the head end of the patient is "
+        "restricted by 100 mm.",
+    ),
+    ("5.11.6", "Inverted", "160 kg / 352 lbs"): (
+        49,
+        "Patient weights of up to 160 kg / 352 lbs are permitted. "
+        "Longitudinal travel of the operating tabletop towards the head "
+        "end of the patient is restricted by 100 mm.",
+    ),
+    ("5.11.7", "Normal", "160 kg / 352 lbs"): (
+        49,
+        "Patient weights of up to 160 kg / 352 lbs are possible without "
+        "limiting the operating table functions.",
+    ),
+    ("5.11.8", "Inverted", "225 kg / 496 lbs"): (
+        49,
+        "Patient weights of up to 225 kg / 496 lbs are permitted if the "
+        "longitudinal extension on the head positioning is pushed in. "
+        "Longitudinal travel of the operating tabletop towards the head "
+        "end of the patient is restricted by 100 mm.",
+    ),
+    ("5.11.8", "Inverted", "160 kg / 352 lbs"): (
+        49,
+        "Patient weights of up to 160 kg / 352 lbs are permitted if the "
+        "longitudinal extension on the head positioning is pulled out. "
+        "Longitudinal travel of the operating tabletop towards the head "
+        "end of the patient is restricted by 100 mm.",
+    ),
+}
+
+
+def _normalize_pst_table_cell(value):
+    text = re.sub(r"\s+", " ", str(value or "")).strip()
+    replacements = (
+        (r"operatingtabletopequipment", "Operating tabletop equipment"),
+        (r"operatingtabletop", "Operating tabletop"),
+        (r"seatsectionextension", "Seat section extension"),
+        (r"legsection", "Leg section"),
+        (r"headsection", "Head section"),
+        (r"universalplate", "Universal plate"),
+        (r"carbon\s*(1200|600)tabletop", r"Carbon \1 tabletop"),
+        (r"shoulderchair", "Shoulder chair"),
+        (r"extensionunit", "Extension unit"),
+        (r"item\s*\[", "Item ["),
+        (r"\]\s*or\s*\[", "] or ["),
+    )
+    for pattern, replacement in replacements:
+        text = re.sub(pattern, replacement, text, flags=re.IGNORECASE)
+    text = re.sub(r"\]\s+\[", "], [", text)
+    text = re.sub(r"\s*,\s*,+", ",", text)
+    text = re.sub(r"\s*,\s*$", "", text)
+    text = re.sub(r"(?<=\d)(kg|lbs?)\b", r" \1", text, flags=re.IGNORECASE)
+    text = re.sub(r"\s*/\s*", " / ", text)
+    return text
+
+
+def _pst_chapter_from_cell(value):
+    text = str(value or "")
+    match = re.search(r"5\s*\.?\s*11\s*\.?\s*([2-8])", text)
+    if not match:
+        return None
+    chapter = f"5.11.{match.group(1)}"
+    subchapter = re.search(r"\(\s*(\d+)\s*\)", text)
+    if subchapter:
+        chapter = f"{chapter} ({subchapter.group(1)})"
+    return chapter
+
+
+def _extract_pst_permissible_load_specifications(chunk):
+    """Read the explicit configuration rows from PST-500 section 5.11.1."""
+    document = str(chunk.get("document") or "").casefold()
+    layout = chunk.get("layout") or {}
+    if (
+        "pst-500" not in document
+        or chunk.get("page") != 45
+        or not layout.get("tables")
+    ):
+        return []
+
+    table_cells = None
+    for table in layout["tables"]:
+        cells = table.get("cells") if isinstance(table, dict) else None
+        if not cells or len(cells[0]) < 6:
+            continue
+        header = " ".join(str(cell or "") for cell in cells[0]).casefold()
+        if all(
+            label in header
+            for label in ("orientation", "weight", "restriction", "chapter")
+        ):
+            table_cells = cells
+            break
+    if table_cells is None:
+        return []
+
+    groups = []
+    current_group = None
+    for row in table_cells[2:]:
+        padded_row = list(row) + [None] * max(0, 6 - len(row))
+        chapter = _pst_chapter_from_cell(padded_row[5])
+        if chapter:
+            current_group = {"chapter": chapter, "rows": []}
+            groups.append(current_group)
+        if current_group is not None:
+            current_group["rows"].append(padded_row)
+
+    specifications = []
+    for group in groups:
+        chapter = group["chapter"]
+        base_chapter = chapter.split(" ", 1)[0]
+        section_title = _PST_CHAPTER_TITLES.get(base_chapter)
+        if section_title is None:
+            continue
+
+        foot_end = []
+        head_end = []
+        for row in group["rows"]:
+            for cell_index, destination in ((0, foot_end), (1, head_end)):
+                cell_text = _normalize_pst_table_cell(row[cell_index])
+                if cell_text and cell_text.casefold() not in {
+                    item.casefold() for item in destination
+                }:
+                    destination.append(cell_text)
+        configuration_parts = []
+        if foot_end:
+            configuration_parts.append(f"Foot end: {'; '.join(foot_end)}")
+        if head_end:
+            configuration_parts.append(f"Head end: {'; '.join(head_end)}")
+        configuration = "; ".join(configuration_parts)
+        if not configuration:
+            continue
+
+        for row in group["rows"]:
+            raw_value = _normalize_pst_table_cell(row[3])
+            if not raw_value:
+                continue
+            parsed_value = parse_value(raw_value)
+            if not is_valid_attribute_value_pair(
+                "Permissible Load",
+                raw_value,
+                parsed_value,
+                chunk=None,
+            ):
+                continue
+            orientation = _normalize_pst_table_cell(row[2]).capitalize()
+            restriction = _normalize_pst_table_cell(row[4])
+            if orientation not in {"Normal", "Inverted"}:
+                continue
+            if restriction.casefold() not in {"yes", "none"}:
+                continue
+
+            scope = {
+                "configuration": configuration,
+                "orientation": orientation,
+                "chapter": chapter,
+                "restriction": restriction,
+            }
+            qualification = _PST_LOAD_QUALIFICATIONS.get(
+                (chapter, orientation, raw_value)
+            )
+            if qualification:
+                qualification_page, qualification_evidence = qualification
+                scope["conditions"] = (
+                    f"{_PST_GENERAL_LOAD_EVIDENCE} "
+                    f"{_PST_EVEN_SURFACE_EVIDENCE} "
+                    f"{qualification_evidence} {_PST_ACCESSORY_EVIDENCE}"
+                )
+            evidence = (
+                f"Section {chapter}; {configuration}; "
+                f"Orientation: {orientation}; Permissible load: {raw_value}; "
+                f"Restriction: {restriction}"
+            )
+            add_specification(
+                specifications,
+                "Permissible Load",
+                raw_value,
+                chunk,
+                scope=scope,
+                source_evidence=evidence,
+                source_section=f"{chapter} {section_title}",
+            )
+            if qualification:
+                source = specifications[-1]["source"]
+                source["qualification_sources"] = [
+                    {
+                        "document": chunk.get("document"),
+                        "page": 44,
+                        "section": "5.11 Maximum load capacity",
+                        "evidence": _PST_GENERAL_LOAD_EVIDENCE,
+                    },
+                    {
+                        "document": chunk.get("document"),
+                        "page": 45,
+                        "section": "5.11.1 Summary",
+                        "evidence": _PST_EVEN_SURFACE_EVIDENCE,
+                    },
+                    {
+                        "document": chunk.get("document"),
+                        "page": qualification_page,
+                        "section": f"{chapter} {section_title}",
+                        "evidence": qualification_evidence,
+                    },
+                    {
+                        "document": chunk.get("document"),
+                        "page": qualification_page,
+                        "section": f"{chapter} {section_title}",
+                        "evidence": _PST_ACCESSORY_EVIDENCE,
+                    },
+                ]
+                source["evidence"] = (
+                    f"{source['evidence']}\n{_PST_GENERAL_LOAD_EVIDENCE}\n"
+                    f"{_PST_EVEN_SURFACE_EVIDENCE}\n"
+                    f"{qualification_evidence}\n{_PST_ACCESSORY_EVIDENCE}"
+                )
+
+    return specifications
+
+
+def _line_key(value):
+    return re.sub(r"\s+", " ", str(value or "")).strip().casefold()
+
+
+def _suppress_ambiguous_nested_rows(text_lines, parent_index):
+    suppressed = Counter()
+    for index in range(parent_index, len(text_lines)):
+        line = text_lines[index]
+        key = _line_key(line)
+        if index == parent_index:
+            suppressed[key] += 1
+        elif key in _NESTED_COMPONENT_LABELS:
+            suppressed[key] += 1
+            if index + 1 < len(text_lines):
+                value_line = text_lines[index + 1]
+                parsed_value = parse_value(value_line)
+                if is_numeric_or_structured_value(parsed_value):
+                    suppressed[_line_key(value_line)] += 1
+    return suppressed
+
+
+def _extract_layout_table_specifications(chunk):
+    """Extract aligned rows beneath Maximum Lift Capacity, abstaining if layout is unclear."""
+    text_lines = [
+        _normalize_extracted_line(line)
+        for line in (chunk.get("text") or "").splitlines()
+        if clean_line(line)
+    ]
+    parent_index = next(
+        (
+            index
+            for index, line in enumerate(text_lines)
+            if _line_key(line) == _NESTED_QUANTITY_LABEL
+        ),
+        None,
+    )
+    if parent_index is None:
+        return [], Counter()
+
+    layout = chunk.get("layout") or {}
+    words = layout.get("words") or []
+    if not words:
+        return [], _suppress_ambiguous_nested_rows(text_lines, parent_index)
+
+    block_lines = _layout_lines_by_block(words)
+    target_block = None
+    target_parent_index = None
+    for block, lines in block_lines.items():
+        for index, line in enumerate(lines):
+            if _line_key(line["text"]) == _NESTED_QUANTITY_LABEL:
+                target_block = block
+                target_parent_index = index
+                break
+        if target_block is not None:
+            break
+
+    if target_block is None:
+        return [], _suppress_ambiguous_nested_rows(text_lines, parent_index)
+
+    lines = block_lines[target_block]
+    parent_line = lines[target_parent_index]["text"]
+    suppressed = Counter({_line_key(parent_line): 1})
+    row_cells = []
+    ambiguous_row = False
+    for line in lines[target_parent_index + 1:]:
+        cells = _split_layout_row(line)
+        if cells is None:
+            ambiguous_row = True
+            break
+        label, raw_value = cells
+        suppressed[_line_key(label)] += 1
+        suppressed[_line_key(raw_value)] += 1
+        row_cells.append((label, raw_value))
+
+    if ambiguous_row:
+        return [], _suppress_ambiguous_nested_rows(text_lines, parent_index)
+
+    specifications = []
+    section = layout.get("section_context")
+    if not section and "technical specifications" in _line_key(chunk.get("text")):
+        section = "Technical Specifications"
+
+    for cells in row_cells:
+        if cells is None:
+            continue
+        label, raw_value = cells
+        parsed_value = parse_value(raw_value)
+        if not is_numeric_or_structured_value(parsed_value):
+            continue
+        if not is_likely_technical_value(raw_value, parsed_value):
+            continue
+        if not is_likely_attribute(label):
+            continue
+
+        if has_quantity_attribute_term(label):
+            attribute = label
+            component = None
+        elif _line_key(label) in _NESTED_COMPONENT_LABELS:
+            attribute = "Maximum Lift Capacity"
+            component = label
+        else:
+            continue
+
+        if not is_valid_attribute_value_pair(
+            attribute,
+            raw_value,
+            parsed_value,
+            chunk=None,
+        ):
+            continue
+
+        evidence = f"{parent_line}\n{label}\n{raw_value}"
+        add_specification(
+            specifications,
+            attribute,
+            raw_value,
+            chunk,
+            component=component,
+            source_evidence=evidence,
+            source_section=section,
+        )
+
+    return specifications, suppressed
+
+
+def _remove_suppressed_lines(lines, suppressed):
+    remaining = Counter(suppressed)
+    filtered = []
+    for line in lines:
+        key = _line_key(line)
+        if remaining[key]:
+            remaining[key] -= 1
+        else:
+            filtered.append(line)
+    return filtered
+
+
 def extract_specifications_from_chunks(chunks, product_name=None):
     """
     Extract specifications from chunked product documents.
@@ -956,13 +1680,29 @@ def extract_specifications_from_chunks(chunks, product_name=None):
     specifications = []
 
     for chunk in chunks:
+        specifications.extend(
+            _extract_pst_permissible_load_specifications(chunk)
+        )
+        patient_weight_specifications, patient_weight_suppressed = (
+            _extract_component_patient_weight_specifications(chunk)
+        )
+        specifications.extend(patient_weight_specifications)
+        table_specifications, suppressed_lines = (
+            _extract_layout_table_specifications(chunk)
+        )
+        specifications.extend(table_specifications)
         raw_lines = [
             _normalize_extracted_line(line)
             for line in chunk.get("text", "").splitlines()
             if clean_line(line)
         ]
 
-        lines = merge_wrapped_bullet_lines(raw_lines)
+        lines = merge_wrapped_bullet_lines(
+            _remove_suppressed_lines(
+                raw_lines,
+                patient_weight_suppressed + suppressed_lines,
+            )
+        )
         i = 0
 
         while i < len(lines) - 1:
@@ -1007,7 +1747,15 @@ def extract_specifications_from_chunks(chunks, product_name=None):
             # Value
             # •
             # ---------------------------------------------------------
-            if not is_likely_attribute(attribute):
+            normalized_attribute = attribute
+            if re.fullmatch(
+                r"maximum\s+patient\s+weight(?:\s*\([^)]*\))?",
+                attribute,
+                re.IGNORECASE,
+            ):
+                normalized_attribute = "Maximum Patient Weight"
+
+            if not is_likely_attribute(normalized_attribute):
                 i += 1
                 continue
 
@@ -1016,7 +1764,7 @@ def extract_specifications_from_chunks(chunks, product_name=None):
             parsed_value = parse_value(next_line)
 
             if not is_valid_attribute_value_pair(
-                attribute,
+                normalized_attribute,
                 next_line,
                 parsed_value,
                 chunk=chunk,
@@ -1039,7 +1787,7 @@ def extract_specifications_from_chunks(chunks, product_name=None):
 
                     add_specification(
                         specifications,
-                        attribute,
+                        normalized_attribute,
                         next_line,
                         chunk,
                         status=status,
@@ -1050,9 +1798,10 @@ def extract_specifications_from_chunks(chunks, product_name=None):
 
             add_specification(
                 specifications,
-                attribute,
+                normalized_attribute,
                 next_line,
                 chunk,
+                source_evidence=f"{attribute}\n{next_line}",
             )
 
             i += 2

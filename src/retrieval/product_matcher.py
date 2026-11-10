@@ -6,7 +6,10 @@ from pathlib import Path
 
 from src.retrieval.corpus_index import CorpusIndex, product_name_from_metadata
 from src.retrieval.document_retrieval import retrieve_passages
-from src.retrieval.evaluator import evaluate_requirement
+from src.retrieval.evaluator import (
+    evaluate_condition_compatibility,
+    evaluate_requirement,
+)
 from src.retrieval.query_schema import normalize_response
 from src.retrieval.query_understanding import understand_query
 from src.retrieval.requirement_parser import (
@@ -14,6 +17,7 @@ from src.retrieval.requirement_parser import (
     classify_query as _classify_query,
     extract_search_terms,
     find_attribute,
+    normalize_component,
     normalize_query,
     normalize_attribute,
     parse_requirement,
@@ -200,6 +204,8 @@ def _load_processed_specifications():
                     "section": source.get("section"),
                     "chunk_id": source.get("chunk_id"),
                     "attribute": attribute,
+                    "component": specification.get("component"),
+                    "scope": specification.get("scope") or source.get("scope"),
                     "raw_value": raw_value,
                     "parsed_value": parsed_value,
                     "availability": specification.get("status"),
@@ -341,6 +347,88 @@ def _document_product(document_name):
 
 def _bed_query(query):
     return bool(re.search(r"\b(bed|beds|hospital bed|birthing bed|icu bed)\b", query, re.I))
+
+
+def _configuration_scope_matches(specification, requested_scope):
+    scope = specification.get("scope")
+    if not isinstance(scope, dict):
+        return False
+
+    configuration = str(scope.get("configuration") or "").casefold()
+    for term in requested_scope.get("configuration_terms") or []:
+        normalized_term = _normalize_text(term)
+        if not re.search(
+            rf"(?<!\w){re.escape(normalized_term)}(?!\w)",
+            _normalize_text(configuration),
+        ):
+            return False
+
+    for item_number in requested_scope.get("item_numbers") or []:
+        if not re.search(
+            rf"\[\s*{int(item_number)}\s*\]",
+            configuration,
+            re.IGNORECASE,
+        ):
+            return False
+
+    conditions = _normalize_text(scope.get("conditions"))
+    for term in requested_scope.get("position_terms") or []:
+        if _normalize_text(term) not in conditions:
+            return False
+
+    orientation = requested_scope.get("orientation")
+    if orientation and str(scope.get("orientation") or "").casefold() != str(
+        orientation
+    ).casefold():
+        return False
+
+    chapter = requested_scope.get("chapter")
+    if chapter and re.sub(
+        r"\s+", "", str(scope.get("chapter") or "")
+    ).casefold() != re.sub(r"\s+", "", str(chapter)).casefold():
+        return False
+
+    return True
+
+
+def _unknown_configuration_result(query, product_name, attribute, specifications, reason):
+    sources = []
+    for specification in specifications:
+        source = specification.get("source") or {
+            "document": specification.get("document"),
+            "page": specification.get("page"),
+            "section": specification.get("section"),
+            "evidence": specification.get("raw_value") or "",
+        }
+        sources.append(source)
+    first_source = sources[0] if sources else {}
+    result = _empty_result(
+        requirement=query,
+        status="UNKNOWN",
+        product=product_name,
+        document=first_source.get("document"),
+        page=first_source.get("page"),
+        section=first_source.get("section"),
+        evidence="; ".join(source.get("evidence") or "" for source in sources),
+        reason=reason,
+        query_type="NUMERIC_SPECIFICATION",
+        attribute=attribute,
+        confidence=0.0,
+        source=first_source or None,
+        sources=sources,
+        source_evidence="; ".join(
+            source.get("evidence") or "" for source in sources
+        ),
+    )
+    result["scopes"] = [
+        specification.get("scope")
+        for specification in specifications
+        if specification.get("scope")
+    ]
+    result["missing_information"] = [
+        f"configuration scope for {attribute} for {product_name}"
+    ]
+    return result
 
 
 def _query_matches_record(query, record):
@@ -883,6 +971,163 @@ def _match_technical_requirement(query, plan=None, catalogue_records=None):
                 specification.get("attribute"),
             )
         ]
+        attribute_specs = product_specs
+        if attributes_equivalent(
+            requirement.get("attribute"),
+            "Permissible Load",
+        ) and attribute_specs:
+            requested_scope = requirement.get("configuration_scope")
+            scoped_specs = [
+                specification
+                for specification in attribute_specs
+                if isinstance(specification.get("scope"), dict)
+            ]
+            if not requested_scope:
+                results.append(
+                    _unknown_configuration_result(
+                        query,
+                        product_name,
+                        requirement.get("attribute"),
+                        attribute_specs,
+                        "The permissible load is configuration-dependent, but "
+                        "the requested configuration is unspecified.",
+                    )
+                )
+                continue
+            matching_scope_specs = [
+                specification
+                for specification in scoped_specs
+                if _configuration_scope_matches(
+                    specification,
+                    requested_scope,
+                )
+            ]
+            if not matching_scope_specs:
+                results.append(
+                    _unknown_configuration_result(
+                        query,
+                        product_name,
+                        requirement.get("attribute"),
+                        attribute_specs,
+                        "No permissible-load evidence matches the explicitly "
+                        "requested configuration and orientation.",
+                    )
+                )
+                continue
+            if len(matching_scope_specs) > 1:
+                results.append(
+                    _unknown_configuration_result(
+                        query,
+                        product_name,
+                        requirement.get("attribute"),
+                        matching_scope_specs,
+                        "The requested scope matches more than one "
+                        "configuration-specific permissible-load value; "
+                        "provide a more specific configuration or orientation.",
+                    )
+                )
+                continue
+            product_specs = matching_scope_specs
+        requested_component = requirement.get("component")
+        component_specs = [
+            specification
+            for specification in attribute_specs
+            if specification.get("component")
+        ]
+        if requested_component:
+            product_specs = [
+                specification
+                for specification in attribute_specs
+                if normalize_component(specification.get("component"))
+                == normalize_component(requested_component)
+            ]
+            if not product_specs:
+                available_specs = attribute_specs
+                available_sources = [
+                    specification.get("source")
+                    or {
+                        "document": specification.get("document"),
+                        "page": specification.get("page"),
+                        "section": specification.get("section"),
+                        "evidence": specification.get("raw_value") or "",
+                    }
+                    for specification in available_specs
+                ]
+                first_source = available_sources[0] if available_sources else {}
+                missing = _empty_result(
+                    requirement=query,
+                    status="UNKNOWN",
+                    product=product_name,
+                    document=first_source.get("document"),
+                    page=first_source.get("page"),
+                    section=first_source.get("section"),
+                    evidence="; ".join(
+                        source.get("evidence") or ""
+                        for source in available_sources
+                    ),
+                    reason=(
+                        f"No specification explicitly associated with "
+                        f"{requested_component} was found for "
+                        f"{requirement.get('attribute')}."
+                    ),
+                    query_type="NUMERIC_SPECIFICATION",
+                    attribute=requirement.get("attribute"),
+                    confidence=0.0,
+                    source=first_source or None,
+                    sources=available_sources,
+                    source_evidence="; ".join(
+                        source.get("evidence") or ""
+                        for source in available_sources
+                    ),
+                )
+                missing["missing_information"] = [
+                    f"{requested_component} {requirement.get('attribute')} for {product_name}"
+                ]
+                results.append(missing)
+                continue
+        elif component_specs:
+            available_sources = [
+                specification.get("source")
+                or {
+                    "document": specification.get("document"),
+                    "page": specification.get("page"),
+                    "section": specification.get("section"),
+                    "evidence": specification.get("raw_value") or "",
+                }
+                for specification in component_specs
+            ]
+            first_source = available_sources[0]
+            missing = _empty_result(
+                requirement=query,
+                status="UNKNOWN",
+                product=product_name,
+                document=first_source.get("document"),
+                page=first_source.get("page"),
+                section=first_source.get("section"),
+                evidence="; ".join(
+                    source.get("evidence") or ""
+                    for source in available_sources
+                ),
+                reason=(
+                    f"{requirement.get('attribute')} evidence has "
+                    f"component-specific values, but the requested component "
+                    f"is unspecified."
+                ),
+                query_type="NUMERIC_SPECIFICATION",
+                attribute=requirement.get("attribute"),
+                confidence=0.0,
+                source=first_source,
+                sources=available_sources,
+                source_evidence="; ".join(
+                    source.get("evidence") or ""
+                    for source in available_sources
+                ),
+            )
+            missing["missing_information"] = [
+                f"component for {requirement.get('attribute')} for {product_name}"
+            ]
+            results.append(missing)
+            continue
         if not product_specs:
             missing = _empty_result(
                 requirement=query,
@@ -909,6 +1154,7 @@ def _match_technical_requirement(query, plan=None, catalogue_records=None):
             parsed_value = specification.get("parsed_value")
             candidate_spec = {
                 "attribute": attribute,
+                "component": specification.get("component"),
                 "raw_value": raw_value,
                 "parsed_value": parsed_value,
                 "unit": parsed_value.get("unit") if isinstance(parsed_value, dict) else None,
@@ -918,9 +1164,15 @@ def _match_technical_requirement(query, plan=None, catalogue_records=None):
                 or (specification.get("source") or {}).get("section"),
                 "chunk_id": specification.get("chunk_id")
                 or (specification.get("source") or {}).get("chunk_id"),
+                "scope": specification.get("scope")
+                or (specification.get("source") or {}).get("scope"),
                 "source": specification.get("source"),
                 "evidence": raw_value,
             }
+            condition_status, condition_reason = evaluate_condition_compatibility(
+                requirement,
+                candidate_spec,
+            )
             status = evaluate_requirement(
                 requirement,
                 raw_value,
@@ -928,7 +1180,9 @@ def _match_technical_requirement(query, plan=None, catalogue_records=None):
                 candidate=candidate_spec,
             )
             candidate_unit = candidate_spec["unit"]
-            if status in {"PASS", "FAIL"}:
+            if condition_status != "PASS":
+                reason = condition_reason
+            elif status in {"PASS", "FAIL"}:
                 reason = "Comparable evidence was converted to the required unit and evaluated against the requested operator."
             elif requirement.get("unit") is None or candidate_unit is None:
                 reason = "A compatible unit is missing, so this numeric comparison cannot be evaluated."
@@ -970,6 +1224,8 @@ def _match_technical_requirement(query, plan=None, catalogue_records=None):
                 parsed_value if isinstance(parsed_value, dict) else parse_value(raw_value),
                 requirement.get("unit"),
             )
+            if specification.get("scope"):
+                result["scope"] = specification["scope"]
             results.append(result)
 
     results = _consolidate_numeric_results(results)
