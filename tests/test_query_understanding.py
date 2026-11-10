@@ -162,6 +162,45 @@ def test_understanding_records_corpus_supported_product_category():
     assert plan.product_category == "medical_bed"
 
 
+@pytest.mark.parametrize(
+    ("question", "expected_product"),
+    [
+        (
+            "Hillrom 900 Accella bed maximum patient weight at least 185 kg",
+            "Hillrom 900 Accella Bed",
+        ),
+        (
+            "Affinity 4 Birthing Bed maximum lift capacity at least 500 lbs",
+            "Affinity 4 Birthing Bed",
+        ),
+        (
+            "TS 7500 Surgical Table maximum weight capacity for OR table column SF "
+            "at least 400 kg",
+            "TS 7500 OR System Table",
+        ),
+    ],
+)
+def test_numeric_requirement_terms_do_not_select_a_different_product(
+    question,
+    expected_product,
+):
+    products = [
+        _product_record("Hillrom 900 Accella Bed", "hillrom.pdf"),
+        _product_record("Affinity 4 Birthing Bed", "affinity.pdf"),
+        _product_record("PST-500 Mobile Operating Table", "pst500.pdf"),
+        _product_record("TS 7500 OR System Table", "ts7500.pdf"),
+        _product_record("TruSystem 7500 Column UM", "trusystem.pdf"),
+    ]
+
+    plan = understand_query(question, products)
+
+    assert plan.entity_refs == (expected_product,)
+    assert plan.supported
+    if "TS 7500" in question:
+        assert plan.conditions[0].attribute == "Maximum Weight Capacity"
+        assert plan.logical_operator == "AND"
+
+
 def test_retrieval_returns_source_provenance_and_honors_product_filter():
     chunks = [
         {

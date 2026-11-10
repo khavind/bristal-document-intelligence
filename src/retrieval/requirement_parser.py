@@ -56,6 +56,8 @@ OPERATOR_PATTERNS = [
 
 ATTRIBUTE_ALIASES = {
     "maximum lift capacity": "Maximum Lift Capacity",
+    "maximum weight capacity": "Maximum Weight Capacity",
+    "max weight capacity": "Maximum Weight Capacity",
     "safe working load": "Safe Working Load",
     "safe work load": "Safe Working Load",
     "working load": "Safe Working Load",
@@ -180,7 +182,7 @@ def find_component(query):
         r"(bed|foot\s+section)\b",
         rf"\b{quantity}\s*[-:]\s*"
         r"(bed|foot\s+section)\b",
-        rf"\b(bed|foot\s+section)\s+{quantity}\b",
+        rf"^\s*(?:the\s+)?(bed|foot\s+section)\s+{quantity}\b",
     )
     for pattern in patterns:
         match = re.search(pattern, text, re.IGNORECASE)
@@ -206,15 +208,31 @@ def find_configuration_scope(query):
     ):
         if re.search(pattern, text, re.IGNORECASE):
             configuration_terms.append(label)
+    for pattern in (
+        r"\b(?:or\s+table\s+)?column\s+(?:hybrid\s+)?"
+        r"(sf|sb|sm|mc2|sc|fc)\b",
+        r"\b(sf|sb|sm|mc2|sc|fc)\s+column\b",
+    ):
+        configuration_terms.extend(
+            match.group(1).upper()
+            for match in re.finditer(pattern, text, re.IGNORECASE)
+        )
+    configuration_terms = list(dict.fromkeys(configuration_terms))
 
-    orientation_match = re.search(
-        r"\b(normal|inverted)(?:\s+patient)?(?:\s+orientation)?\b",
-        text,
-        re.IGNORECASE,
+    orientation_matches = list(
+        re.finditer(
+            r"\b(normal|inverted)(?:\s+patient)?(?:\s+orientation)?\b",
+            text,
+            re.IGNORECASE,
+        )
     )
+    orientations = {
+        match.group(1).capitalize()
+        for match in orientation_matches
+    }
     orientation = (
-        orientation_match.group(1).capitalize()
-        if orientation_match
+        orientation_matches[0].group(1).capitalize()
+        if orientation_matches
         else None
     )
     chapter_match = re.search(
@@ -243,16 +261,38 @@ def find_configuration_scope(query):
     ):
         return None
 
-    return {
+    scope = {
         "configuration_terms": configuration_terms,
         "orientation": orientation,
         "chapter": chapter,
         "item_numbers": item_numbers,
         "position_terms": position_terms,
     }
+    table_configuration_groups = {
+        "SF": "SF",
+        "SB": "SB",
+        "SM": "SM/MC2",
+        "MC2": "SM/MC2",
+        "SC": "SC/FC",
+        "FC": "SC/FC",
+    }
+    requested_table_groups = {
+        table_configuration_groups[term]
+        for term in configuration_terms
+        if term in table_configuration_groups
+    }
+    if len(requested_table_groups) > 1:
+        scope["configuration_ambiguous"] = True
+    if len(orientations) > 1:
+        scope["orientation_conflict"] = True
+    return scope
 
 
 def _inclination_operator(modifier):
+    modifier = modifier.strip()
+    if not modifier:
+        return "="
+
     for symbol, operator in (
         (">=", ">="),
         ("<=", "<="),
@@ -262,47 +302,268 @@ def _inclination_operator(modifier):
         ("<", "<"),
         ("=", "="),
     ):
-        if symbol in modifier:
+        if re.search(re.escape(symbol), modifier):
             return operator
 
     patterns = (
-        (r"(?:greater than or equal to|at least|not less than|above)", ">="),
+        (
+            r"(?:greater than or equal to|at least|not less than|no less than)",
+            ">=",
+        ),
         (r"(?:less than or equal to|no greater than|not greater than|"
-         r"no more than|not more than|at most|up to)", "<="),
-        (r"(?:greater than|more than|exceeds)", ">"),
+         r"no more than|not more than|at most|up to|"
+         r"(?:should|must|does) not exceed|not exceed)", "<="),
+        (r"(?:greater than|more than|above|exceeds)", ">"),
         (r"(?:less than|below|under)", "<"),
         (r"(?:equal to|equals?|exactly)", "="),
     )
     for pattern, operator in patterns:
         if re.search(rf"(?<!\w){pattern}(?!\w)", modifier, re.IGNORECASE):
             return operator
-    return "="
+    if re.fullmatch(r"at", modifier, re.IGNORECASE):
+        return "="
+    return None
 
 
 def _inclination_condition(query):
-    pattern = re.compile(
+    unit = r"(?:degrees?|deg|°|�)(?![a-z])"
+    value = r"(?P<value>\d+(?:\.\d+)?)"
+    named_pattern = re.compile(
         r"\b(?:inclination|tilt(?:ed|ing)?|inclined|angle)\b"
         r"(?P<modifier>[^.;,]{0,60}?)"
-        r"(?P<value>\d+(?:\.\d+)?)\s*(?:degrees?|deg|°|�)(?![a-z])",
+        + value
+        + r"\s*"
+        + unit,
         re.IGNORECASE,
     )
-    match = pattern.search(query)
-    if not match:
-        pattern = re.compile(
-            r"(?P<modifier>(?:>=|<=|>|<|=|≥|≤|"
-            r"at\s+least|at\s+most|no\s+more\s+than|"
-            r"no\s+less\s+than|at)?\s*)"
-            r"(?P<value>\d+(?:\.\d+)?)\s*(?:degrees?|deg|°|�)(?![a-z])",
+    standalone_pattern = re.compile(
+        r"(?P<modifier>(?:>=|<=|>|<|=|≥|≤|"
+        r"at\s+least|at\s+most|no\s+more\s+than|no\s+less\s+than|"
+        r"(?:should|must|does)\s+not\s+exceed|not\s+exceed|"
+        r"greater\s+than|less\s+than|exactly|at)?\s*)"
+        + value
+        + r"\s*"
+        + unit,
+        re.IGNORECASE,
+    )
+
+    matches = []
+    occupied_spans = []
+    for match in named_pattern.finditer(query):
+        occupied_spans.append(match.span())
+        matches.append((match.start(), match.end(), match))
+    for match in standalone_pattern.finditer(query):
+        if any(
+            match.start() < end and start < match.end()
+            for start, end in occupied_spans
+        ):
+            continue
+        matches.append((match.start(), match.end(), match))
+    matches.sort(key=lambda item: item[0])
+
+    if not matches:
+        return None
+
+    conditions = [
+        {
+            "operator": _inclination_operator(match.group("modifier")),
+            "value": float(match.group("value")),
+            "unit": "degrees",
+        }
+        for _, _, match in matches
+    ]
+    if len(conditions) == 1:
+        return conditions[0]
+
+    connectors = []
+    for (_, previous_end, _), (next_start, _, _) in zip(matches, matches[1:]):
+        between = query[previous_end:next_start].casefold()
+        has_or = bool(re.search(r"\bor\b", between))
+        has_and = bool(re.search(r"\band\b", between))
+        if has_or and has_and:
+            connectors.append("AMBIGUOUS")
+        elif has_or:
+            connectors.append("OR")
+        else:
+            connectors.append("AND")
+    logical_operator = (
+        connectors[0]
+        if len(set(connectors)) == 1 and "AMBIGUOUS" not in connectors
+        else "AMBIGUOUS"
+    )
+    return {
+        "conditions": conditions,
+        "logical_operator": logical_operator,
+    }
+
+
+def _travel_condition(query):
+    travel_or_tabletop = (
+        r"\b(?:(?:longitudinal\s+)?travel|"
+        r"(?:operating\s+)?tabletop|operating\s+table)\b"
+    )
+    gap = r"(?:(?!\b(?:and|or)\b).){0,50}?"
+    negative_pattern = re.compile(
+        r"\b(?:non[\s-]*level|not[\s-]+level)\b.{0,35}?"
+        + travel_or_tabletop
+        + r"|"
+        + travel_or_tabletop + gap
+        + r"\b(?:not|never|cannot|can't)\b.{0,20}?\blevel\b|"
+        + travel_or_tabletop + gap
+        + r"\b(?:must|shall|should)\s+not\b.{0,20}?\blevel\b|"
+        + travel_or_tabletop + gap
+        + r"\bnon[\s-]*level\b|"
+        + r"\binclined\s+(?:(?:longitudinal\s+)?travel|tabletop)\b|"
+        + travel_or_tabletop + gap
+        + r"\binclined\b",
+        re.IGNORECASE,
+    )
+    positive_pattern = re.compile(
+        r"\blevel\b(?:(?!\b(?:and|or)\b).){0,30}?"
+        + travel_or_tabletop
+        + r"|"
+        + travel_or_tabletop + gap
+        + r"\blevel\b",
+        re.IGNORECASE,
+    )
+    matches = [
+        (match.start(), match.end(), "not_level")
+        for match in negative_pattern.finditer(query)
+    ]
+    matches.extend(
+        (match.start(), match.end(), "level")
+        for match in positive_pattern.finditer(query)
+        if not re.search(
+            r"\b(?:not|never|cannot|can't|must|shall|should|non)\b",
+            match.group(),
             re.IGNORECASE,
         )
-        match = pattern.search(query)
-    if not match:
+        and not re.search(
+            r"\b(?:non|not)[\s-]*$",
+            query[:match.start()],
+            re.IGNORECASE,
+        )
+    )
+    return _condition_values_with_logic(matches, query)
+
+
+def _condition_values_with_logic(matches, query):
+    matches = sorted(set(matches), key=lambda item: (item[0], item[1]))
+    if not matches:
         return None
-    return {
-        "operator": _inclination_operator(match.group("modifier")),
-        "value": float(match.group("value")),
-        "unit": "degrees",
-    }
+    values = [value for _, _, value in matches]
+    if len(values) == 1:
+        return values[0]
+    connectors = []
+    for (_, previous_end, _), (next_start, _, _) in zip(matches, matches[1:]):
+        between = query[previous_end:next_start].casefold()
+        has_or = bool(re.search(r"\bor\b", between))
+        has_and = bool(re.search(r"\band\b", between))
+        if has_or and has_and:
+            connectors.append("AMBIGUOUS")
+        elif has_or:
+            connectors.append("OR")
+        else:
+            connectors.append("AND")
+    logical_operator = (
+        connectors[0]
+        if len(set(connectors)) == 1 and "AMBIGUOUS" not in connectors
+        else "AMBIGUOUS"
+    )
+    return {"conditions": values, "logical_operator": logical_operator}
+
+
+_LOAD_DISTRIBUTION_PATTERNS = (
+    (
+        "not_even",
+        re.compile(
+            r"\b(?:not|never)[\s-]+(?:evenly|even|uniformly|uniform)"
+            r"[\s-]+(?:loaded|load|loading)\b|"
+            r"\b(?:loaded|loading|load)\b.{0,25}\b(?:not|never)"
+            r"[\s-]+(?:evenly|even|uniformly|uniform)\b",
+            re.IGNORECASE,
+        ),
+    ),
+    (
+        "not_uneven",
+        re.compile(
+            r"\b(?:not|never)[\s-]+(?:unevenly|uneven|asymmetrically|"
+            r"asymmetric|non[\s-]*uniformly|nonuniformly|one[\s-]*sided)"
+            r"[\s-]+(?:loaded|load|loading)\b|"
+            r"\b(?:loaded|loading|load)\b.{0,25}\b(?:not|never)"
+            r"[\s-]+(?:unevenly|uneven|asymmetrically|asymmetric|"
+            r"non[\s-]*uniformly|nonuniformly|one[\s-]*sided)\b",
+            re.IGNORECASE,
+        ),
+    ),
+    (
+        "even",
+        re.compile(
+            r"\b(?:evenly|uniformly)[\s-]+loaded\b|"
+            r"\beven\s+load(?:ed|ing)?\b",
+            re.IGNORECASE,
+        ),
+    ),
+    (
+        "uneven",
+        re.compile(
+            r"\bunevenly[\s-]+loaded\b|"
+            r"\buneven\s+load(?:ed|ing)?\b|"
+            r"\basymmetrically[\s-]+loaded\b|"
+            r"\basymmetric\s+load(?:ed|ing)?\b|"
+            r"\bone[\s-]+sided\s+load(?:ed|ing)?\b|"
+            r"\bnon[\s-]*uniform\s+load(?:ed|ing)?\b|"
+            r"\bnonuniform\s+load(?:ed|ing)?\b|"
+            r"\bloaded\s+unevenly\b",
+            re.IGNORECASE,
+        ),
+    ),
+)
+
+
+def _load_distribution_condition(query):
+    matches = []
+    negative_matches = []
+    for value, pattern in _LOAD_DISTRIBUTION_PATTERNS[:2]:
+        for match in pattern.finditer(query):
+            matches.append((match.start(), match.end(), value))
+            negative_matches.append(match.span())
+    for value, pattern in _LOAD_DISTRIBUTION_PATTERNS[2:]:
+        for match in pattern.finditer(query):
+            if any(
+                match.start() < end and start < match.end()
+                for start, end in negative_matches
+            ):
+                continue
+            matches.append((match.start(), match.end(), value))
+    matches.sort(key=lambda item: item[0])
+
+    if not matches:
+        return None, False
+
+    values = {value for _, _, value in matches}
+    if len(values) == 1:
+        return matches[0][2], False
+    condition = _condition_values_with_logic(matches, query)
+    if condition["logical_operator"] == "OR":
+        return condition, False
+    return None, True
+
+
+def _position_condition(query):
+    pattern = re.compile(
+        r"\b(?P<reverse>reverse\s+)?trendelenburg(?:\s+position)?\b",
+        re.IGNORECASE,
+    )
+    matches = [
+        (
+            match.start(),
+            match.end(),
+            "reverse_trendelenburg" if match.group("reverse") else "trendelenburg",
+        )
+        for match in pattern.finditer(query)
+    ]
+    return _condition_values_with_logic(matches, query)
 
 
 def find_condition_scope(query):
@@ -346,60 +607,61 @@ def find_condition_scope(query):
     ):
         conditions["travel_restriction"] = "none"
 
-    if re.search(r"\b(?:reverse\s+)?trendelenburg(?:\s+position)?\b", lower):
-        conditions["position"] = (
-            "reverse_trendelenburg"
-            if re.search(r"\breverse\s+trendelenburg\b", lower)
-            else "trendelenburg"
-        )
+    position = _position_condition(lower)
+    if position:
+        conditions["position"] = position
 
-    if re.search(r"\b(?:unevenly|uneven|non[- ]uniformly)\s+loaded\b", lower):
-        conditions["load_distribution"] = "uneven"
-    elif re.search(r"\bevenly\s+loaded\b", lower):
-        conditions["load_distribution"] = "even"
+    load_distribution, conflicting_distribution = _load_distribution_condition(lower)
+    if load_distribution:
+        conditions["load_distribution"] = load_distribution
+    if conflicting_distribution:
+        conditions["unsupported"] = True
 
     inclination = _inclination_condition(lower)
     if inclination:
         conditions["inclination"] = inclination
+        inclination_conditions = inclination.get("conditions", [inclination])
+        if any(condition.get("operator") is None for condition in inclination_conditions):
+            conditions["unsupported"] = True
 
-    travel_or_tabletop = (
-        r"\b(?:(?:longitudinal\s+)?travel|"
-        r"(?:operating\s+)?tabletop|operating\s+table)\b"
+    travel = _travel_condition(lower)
+    if travel:
+        conditions["longitudinal_travel"] = travel
+
+    angle_negation = bool(
+        re.search(
+            r"\b(?:not|never|cannot|can't)\s+(?:the\s+)?"
+            r"(?:inclination|tilt(?:ed|ing)?|angle)\b|"
+            r"\b(?:inclination|tilt(?:ed|ing)?|angle)\b.{0,35}"
+            r"\b(?:not|never)\s+(?:at\s+least|at\s+most)\b|"
+            r"\b(?:inclination|tilt(?:ed|ing)?|angle)\b.{0,35}"
+            r"\bnot\s*(?:>=|<=|>|<|≥|≤)",
+            lower,
+        )
     )
-    negative_level_travel = re.search(
-        r"\b(?:non[\s-]*level|not[\s-]+level)\b.{0,35}"
-        + travel_or_tabletop
-        + r"|"
-        + travel_or_tabletop
-        + r".{0,50}\b(?:not|never|cannot|can't)\b"
-        r".{0,20}\blevel\b|"
-        + travel_or_tabletop
-        + r".{0,50}\b(?:must|shall|should)\s+not\b"
-        r".{0,20}\blevel\b|"
-        + travel_or_tabletop
-        + r".{0,30}\bnon[\s-]*level\b",
+    position_mentions = re.findall(
+        r"\b(?:reverse\s+)?trendelenburg\b",
         lower,
     )
-    positive_level_travel = re.search(
-        r"\blevel\b.{0,35}"
-        + travel_or_tabletop
-        + r"|"
-        + travel_or_tabletop
-        + r".{0,50}\blevel\b",
-        lower,
+    cross_category_or = bool(
+        re.search(r"\bor\b", lower)
+        and sum(
+            bool(value)
+            for value in (
+                inclination,
+                travel,
+                load_distribution,
+                conditions.get("position"),
+                conditions.get("restriction"),
+                conditions.get("function_restriction"),
+                conditions.get("travel_restriction"),
+            )
+        ) > 1
     )
-    inclined_travel = re.search(
-        r"\binclined\s+(?:(?:longitudinal\s+)?travel|tabletop)\b|"
-        + travel_or_tabletop
-        + r".{0,35}\binclined\b",
-        lower,
+    mixed_connectors = bool(
+        re.search(r"\band\b", lower)
+        and re.search(r"\bor\b", lower)
     )
-    if negative_level_travel:
-        conditions["longitudinal_travel"] = "not_level"
-    elif positive_level_travel:
-        conditions["longitudinal_travel"] = "level"
-    elif inclined_travel:
-        conditions["longitudinal_travel"] = "not_level"
 
     unsupported_condition = bool(
         re.search(r"\baccessor(?:y|ies)\b", lower)
@@ -411,10 +673,12 @@ def find_condition_scope(query):
             )
             and "position" not in conditions
         )
-        or (
-            re.search(r"\b(?:incline|slope|sloped)\b", lower)
-            and not inclination
-            and not inclined_travel
+        or re.search(
+            r"\b(?:on|at|with)\s+(?:an?\s+)?(?:incline|slope)\b|"
+            r"\b(?:tabletop|operating table)\b.{0,35}"
+            r"\b(?:slope|sloped)\b|"
+            r"\b(?:slope|sloped)\b.{0,35}\b(?:tabletop|operating table)\b",
+            lower,
         )
         or (
             re.search(r"\b(?:tilt\w*|inclination|angle)\b", lower)
@@ -423,8 +687,9 @@ def find_condition_scope(query):
         or (
             re.search(r"\binclined\b", lower)
             and not inclination
-            and not inclined_travel
+            and not travel
         )
+        or angle_negation
         or (
             re.search(r"\btravel\b", lower)
             and not any(
@@ -451,7 +716,18 @@ def find_condition_scope(query):
             and "function_restriction" not in conditions
         )
         or (
-            re.search(r"\bloaded\b|\bload distribution\b", lower)
+            re.search(
+                r"\b(?:even(?:ly)?|uniform(?:ly)?|uneven(?:ly)?|"
+                r"asymmetr(?:ic|ically)|non[\s-]*uniform|"
+                r"one[\s-]*sided|radial(?:ly)?|concentrated)\b"
+                r".{0,25}\b(?:load|loaded|loading)\b|"
+                r"\b(?:loaded|loading)\b.{0,25}"
+                r"\b(?:even(?:ly)?|uniform(?:ly)?|uneven(?:ly)?|"
+                r"asymmetr(?:ic|ically)|non[\s-]*uniform|"
+                r"one[\s-]*sided|radial(?:ly)?|concentrated)\b|"
+                r"\bload\s+distribution\b",
+                lower,
+            )
             and "load_distribution" not in conditions
         )
         or (
@@ -478,7 +754,24 @@ def find_condition_scope(query):
             lower,
         )
     )
-    if unsupported_condition:
+    configuration_scope = find_configuration_scope(text)
+    orientation_conflict = bool(
+        configuration_scope and configuration_scope.get("orientation_conflict")
+    )
+    if (
+        unsupported_condition
+        or conflicting_distribution
+        or orientation_conflict
+        or (
+            len(set(position_mentions)) > 1
+            and not (
+                isinstance(position, dict)
+                and position.get("logical_operator") == "OR"
+            )
+        )
+        or cross_category_or
+        or mixed_connectors
+    ):
         conditions["unsupported"] = True
 
     return conditions or None

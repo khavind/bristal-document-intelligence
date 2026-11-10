@@ -14,6 +14,40 @@ from src.retrieval.unit_converter import convert
 def evaluate_condition_compatibility(requirement, candidate):
     """Evaluate explicit operating conditions against qualified source evidence."""
     requested = requirement.get("condition_scope")
+    candidate_source = (
+        candidate.get("source") if isinstance(candidate, dict) else None
+    )
+    candidate_scope = (
+        candidate.get("scope") if isinstance(candidate, dict) else None
+    )
+    if not isinstance(candidate_scope, dict) and isinstance(candidate_source, dict):
+        candidate_scope = candidate_source.get("scope")
+    if _has_position_dependent_capacity_qualification(
+        candidate,
+        candidate_scope,
+        candidate_source,
+    ):
+        requested_position = (
+            requested.get("position") if isinstance(requested, dict) else None
+        )
+        if not requested_position:
+            return (
+                "UNKNOWN",
+                "The source qualifies maximum weight capacity by patient "
+                "position, but the requirement does not specify a position.",
+            )
+        if not _source_supports_position_specific_capacity(
+            candidate,
+            candidate_scope,
+            candidate_source,
+            requested_position,
+        ):
+            return (
+                "UNKNOWN",
+                "The source does not establish a maximum weight capacity for "
+                "the requested patient position.",
+            )
+
     if not requested:
         original_query = str(requirement.get("original_query") or "")
         if re.search(
@@ -49,6 +83,12 @@ def evaluate_condition_compatibility(requirement, candidate):
         scope = source.get("scope")
     if not isinstance(scope, dict):
         return "UNKNOWN", "The requested operating conditions have no scoped source evidence."
+    if requested.get("unsupported"):
+        return (
+            "UNKNOWN",
+            "The requested operating condition is not recognized well enough "
+            "to compare with the source.",
+        )
 
     source_conditions = [str(scope.get("conditions") or "")]
     qualification_sources = (
@@ -80,15 +120,6 @@ def evaluate_condition_compatibility(requirement, candidate):
         )
     )
     outcomes = []
-
-    if requested.get("unsupported"):
-        outcomes.append(
-            (
-                "UNKNOWN",
-                "The requested operating condition is not recognized well enough "
-                "to compare with the source.",
-            )
-        )
 
     requested_restriction = requested.get("restriction")
     source_restriction = str(scope.get("restriction") or "").strip().casefold()
@@ -174,167 +205,245 @@ def evaluate_condition_compatibility(requirement, candidate):
                 condition_text,
             )
         )
-        if source_requires_level:
-            status = "PASS" if requested_travel == "level" else "FAIL"
+        if source_requires_level and source_requires_non_level:
             outcomes.append(
                 (
-                    status,
-                    "The source requires level longitudinal travel."
-                    if status == "PASS"
-                    else "The requested travel condition contradicts the source's level-travel requirement.",
+                    "UNKNOWN",
+                    "The source contains conflicting longitudinal-travel qualifications.",
                 )
             )
-        elif source_requires_non_level:
-            status = "PASS" if requested_travel == "not_level" else "FAIL"
-            outcomes.append(
-                (
-                    status,
-                    "The source supports the requested non-level travel condition."
-                    if status == "PASS"
-                    else "The requested level-travel condition contradicts the source.",
-                )
-            )
-        else:
+        elif not source_requires_level and not source_requires_non_level:
             outcomes.append(
                 ("UNKNOWN", "The source does not establish the requested travel condition.")
+            )
+        else:
+            if isinstance(requested_travel, dict):
+                requested_travels = requested_travel.get("conditions")
+                logical_operator = requested_travel.get("logical_operator", "AND")
+            else:
+                requested_travels = None
+                logical_operator = "AND"
+            if not isinstance(requested_travels, list):
+                requested_travels = [requested_travel]
+                logical_operator = "AND"
+            source_travel = "level" if source_requires_level else "not_level"
+            travel_outcomes = [
+                (
+                    "PASS" if condition == source_travel else "FAIL",
+                    (
+                        f"The source requires {source_travel.replace('_', ' ')} "
+                        "longitudinal travel."
+                        if condition == source_travel
+                        else "The requested travel condition contradicts the source qualification."
+                    ),
+                )
+                for condition in requested_travels
+            ]
+            outcomes.append(
+                (
+                    _combine_condition_statuses(
+                        [status for status, _ in travel_outcomes],
+                        logical_operator,
+                    ),
+                    " ".join(reason for _, reason in travel_outcomes),
+                )
             )
 
     requested_distribution = requested.get("load_distribution")
     if requested_distribution:
-        source_even = bool(
-            re.search(r"\bevenly\s+loaded\b|\beven\s+surface\s+load\b", condition_text)
+        distribution_evidence = _source_load_distribution_evidence(source_conditions)
+        requested_distributions = (
+            requested_distribution.get("conditions")
+            if isinstance(requested_distribution, dict)
+            else None
         )
-        source_uneven = bool(
-            re.search(r"\b(?:unevenly|uneven|non[- ]uniformly)\s+loaded\b", condition_text)
+        distribution_operator = (
+            requested_distribution.get("logical_operator", "AND")
+            if isinstance(requested_distribution, dict)
+            else "AND"
         )
-        if requested_distribution == "uneven" and source_even:
+        if not isinstance(requested_distributions, list):
+            requested_distributions = [requested_distribution]
+            distribution_operator = "AND"
+        if distribution_evidence["conflicting"] or distribution_evidence["unsupported"]:
             outcomes.append(
-                ("FAIL", "The source requires an evenly loaded tabletop.")
-            )
-        elif requested_distribution == "even" and source_uneven:
-            outcomes.append(
-                ("FAIL", "The source requires an uneven load distribution.")
-            )
-        elif requested_distribution == "even" and source_even:
-            outcomes.append(
-                ("PASS", "The source requires an evenly loaded tabletop.")
-            )
-        elif requested_distribution == "uneven" and source_uneven:
-            outcomes.append(
-                ("PASS", "The source supports the requested uneven load distribution.")
+                (
+                    "UNKNOWN",
+                    "The source contains conflicting, ambiguous, or unsupported "
+                    "load-distribution qualifications.",
+                )
             )
         else:
+            distribution_outcomes = []
+            for distribution in requested_distributions:
+                source_even = "even" in distribution_evidence["states"]
+                source_not_even = "not_even" in distribution_evidence["states"]
+                source_uneven = "uneven" in distribution_evidence["states"]
+                source_not_uneven = "not_uneven" in distribution_evidence["states"]
+                if distribution in {"uneven", "not_even"} and source_even:
+                    distribution_outcomes.append(
+                        ("FAIL", "The source requires an evenly loaded tabletop.")
+                    )
+                elif distribution in {"even", "not_uneven"} and (
+                    source_uneven or source_not_even
+                ):
+                    distribution_outcomes.append(
+                        ("FAIL", "The source contradicts the requested even load distribution.")
+                    )
+                elif distribution in {"even", "not_uneven"} and (
+                    source_even or source_not_uneven
+                ):
+                    distribution_outcomes.append(
+                        ("PASS", "The source requires an evenly loaded tabletop.")
+                    )
+                elif distribution in {"uneven", "not_even"} and source_uneven:
+                    distribution_outcomes.append(
+                        ("PASS", "The source supports the requested uneven load distribution.")
+                    )
+                elif distribution == "not_even" and source_not_even:
+                    distribution_outcomes.append(
+                        ("PASS", "The source explicitly excludes an evenly loaded tabletop.")
+                    )
+                elif distribution == "not_uneven" and source_not_uneven:
+                    distribution_outcomes.append(
+                        ("PASS", "The source explicitly excludes uneven loading.")
+                    )
+                else:
+                    distribution_outcomes.append(
+                        ("UNKNOWN", "The source does not establish the requested load distribution.")
+                    )
             outcomes.append(
-                ("UNKNOWN", "The source does not establish the requested load distribution.")
+                (
+                    _combine_condition_statuses(
+                        [status for status, _ in distribution_outcomes],
+                        distribution_operator,
+                    ),
+                    " ".join(reason for _, reason in distribution_outcomes),
+                )
             )
 
     requested_position = requested.get("position")
     if requested_position:
-        position_phrases = {
-            "trendelenburg": r"\btrendelenburg\b",
-            "reverse_trendelenburg": r"\breverse\s+trendelenburg\b",
-        }
-        source_position = next(
-            (
-                name
-                for name, pattern in position_phrases.items()
-                if re.search(pattern, condition_text)
-            ),
-            None,
+        source_has_reverse_trendelenburg = bool(
+            re.search(r"\breverse\s+trendelenburg\b", condition_text)
         )
-        if source_position == requested_position:
-            outcomes.append(
-                ("PASS", "The source explicitly supports the requested table position.")
+        source_without_reverse = re.sub(
+            r"\breverse\s+trendelenburg\b",
+            "",
+            condition_text,
+        )
+        source_has_trendelenburg = bool(
+            re.search(r"\btrendelenburg\b", source_without_reverse)
+        )
+        source_positions = {
+            position
+            for position, present in (
+                ("trendelenburg", source_has_trendelenburg),
+                ("reverse_trendelenburg", source_has_reverse_trendelenburg),
             )
-        elif source_position:
+            if present
+        }
+        requested_positions = (
+            requested_position.get("conditions")
+            if isinstance(requested_position, dict)
+            else None
+        )
+        position_operator = (
+            requested_position.get("logical_operator", "AND")
+            if isinstance(requested_position, dict)
+            else "AND"
+        )
+        if not isinstance(requested_positions, list):
+            requested_positions = [requested_position]
+            position_operator = "AND"
+        if len(source_positions) > 1:
             outcomes.append(
-                ("FAIL", "The source explicitly describes a different table position.")
+                (
+                    "UNKNOWN",
+                    "The source contains conflicting operating-position qualifications.",
+                )
             )
         else:
+            source_position = next(iter(source_positions), None)
+            position_outcomes = [
+                (
+                    "PASS"
+                    if requested == source_position
+                    else "FAIL"
+                    if source_position
+                    else "UNKNOWN",
+                    (
+                        "The source explicitly supports the requested table position."
+                        if requested == source_position
+                        else "The source explicitly describes a different table position."
+                        if source_position
+                        else "The source does not establish the requested operating position."
+                    ),
+                )
+                for requested in requested_positions
+            ]
             outcomes.append(
-                ("UNKNOWN", "The source does not establish the requested operating position.")
+                (
+                    _combine_condition_statuses(
+                        [status for status, _ in position_outcomes],
+                        position_operator,
+                    ),
+                    " ".join(reason for _, reason in position_outcomes),
+                )
             )
 
     requested_inclination = requested.get("inclination")
     if isinstance(requested_inclination, dict):
-        source_limit = re.search(
-            r"\b(?:inclined|tilted|inclination)\b.{0,100}?"
-            r"\b(?:no more than|not more than|at most|up to|limited to)\s*"
-            r"(\d+(?:\.\d+)?)\s*(?:degrees?|deg|°|�)?",
-            condition_text,
+        requested_inclinations = requested_inclination.get("conditions")
+        logical_operator = requested_inclination.get("logical_operator", "AND")
+        if not isinstance(requested_inclinations, list):
+            requested_inclinations = [requested_inclination]
+            logical_operator = "AND"
+        source_limits, unsupported_source_angle = _source_maximum_inclinations(
+            source_conditions
         )
-        if not source_limit:
+        source_limit_values = set(source_limits)
+        if unsupported_source_angle:
+            outcomes.append(
+                (
+                    "UNKNOWN",
+                    "The source contains an angle qualification that cannot be "
+                    "interpreted safely.",
+                )
+            )
+        elif not source_limits:
             outcomes.append(
                 ("UNKNOWN", "The source does not establish a maximum inclination.")
             )
+        elif len(source_limit_values) > 1:
+            outcomes.append(
+                (
+                    "UNKNOWN",
+                    "The source contains conflicting maximum-inclination qualifications.",
+                )
+            )
+        elif logical_operator == "AMBIGUOUS":
+            outcomes.append(
+                (
+                    "UNKNOWN",
+                    "The relationship between requested inclination conditions is ambiguous.",
+                )
+            )
         else:
-            maximum = float(source_limit.group(1))
-            requested_value = float(requested_inclination["value"])
-            requested_operator = requested_inclination.get("operator")
-            if requested_operator == "=" and requested_value > maximum:
-                outcomes.append(
-                    (
-                        "FAIL",
-                        f"The requested {requested_value:g}-degree inclination exceeds "
-                        f"the source limit of {maximum:g} degrees.",
-                    )
+            maximum = next(iter(source_limit_values))
+            angle_outcomes = [
+                _evaluate_inclination_against_maximum(condition, maximum)
+                for condition in requested_inclinations
+            ]
+            outcomes.append(
+                (
+                    _combine_condition_statuses(
+                        [status for status, _ in angle_outcomes],
+                        logical_operator,
+                    ),
+                    " ".join(reason for _, reason in angle_outcomes),
                 )
-            elif requested_operator == "=":
-                outcomes.append(
-                    (
-                        "PASS",
-                        f"The requested inclination is within the source limit "
-                        f"of {maximum:g} degrees.",
-                    )
-                )
-            elif requested_operator == "<=" and requested_value >= maximum:
-                outcomes.append(
-                    (
-                        "PASS",
-                        f"The source maximum of {maximum:g} degrees satisfies the "
-                        "requested upper bound.",
-                    )
-                )
-            elif requested_operator == "<" and requested_value > maximum:
-                outcomes.append(
-                    (
-                        "PASS",
-                        f"The source maximum of {maximum:g} degrees is below the "
-                        "requested upper bound.",
-                    )
-                )
-            elif requested_operator in {"<=", "<"}:
-                outcomes.append(
-                    (
-                        "UNKNOWN",
-                        "The source maximum does not establish the stricter requested "
-                        "inclination bound.",
-                    )
-                )
-            elif requested_operator == ">":
-                status = "FAIL" if requested_value >= maximum else "UNKNOWN"
-                outcomes.append(
-                    (
-                        status,
-                        "The requested lower bound exceeds the source maximum."
-                        if status == "FAIL"
-                        else "The source maximum does not establish the requested lower bound.",
-                    )
-                )
-            elif requested_operator == ">=":
-                status = "FAIL" if requested_value > maximum else "UNKNOWN"
-                outcomes.append(
-                    (
-                        status,
-                        "The requested lower bound exceeds the source maximum."
-                        if status == "FAIL"
-                        else "The source maximum does not establish the requested lower bound.",
-                    )
-                )
-            else:
-                outcomes.append(
-                    ("UNKNOWN", "The requested inclination relation is not established by the source.")
-                )
+            )
 
     failures = [reason for status, reason in outcomes if status == "FAIL"]
     if failures:
@@ -343,6 +452,324 @@ def evaluate_condition_compatibility(requirement, candidate):
     if unknowns:
         return "UNKNOWN", " ".join(unknowns)
     return "PASS", " ".join(reason for _, reason in outcomes)
+
+
+def _has_position_dependent_capacity_qualification(candidate, scope, source):
+    if not isinstance(candidate, dict) or not attributes_equivalent(
+        candidate.get("attribute"),
+        "Max. weight capacity",
+    ):
+        return False
+    restriction = str((scope or {}).get("restriction") or "").casefold()
+    if restriction in {"position-dependent", "position dependent"}:
+        return True
+    evidence = [str((scope or {}).get("conditions") or "")]
+    if isinstance(source, dict):
+        evidence.append(str(source.get("evidence") or ""))
+        qualifications = source.get("qualification_sources") or []
+        if isinstance(qualifications, list):
+            evidence.extend(
+                str(item.get("evidence") or "")
+                for item in qualifications
+                if isinstance(item, dict)
+            )
+    return any(
+        re.search(
+            r"\bwith restrictions?,\s*depending on (?:the )?position "
+            r"of (?:the )?patient\b",
+            text,
+            re.IGNORECASE,
+        )
+        for text in evidence
+    )
+
+
+def _source_supports_position_specific_capacity(
+    candidate,
+    scope,
+    source,
+    requested_position,
+):
+    if isinstance(requested_position, dict):
+        positions = requested_position.get("conditions")
+        logical_operator = requested_position.get("logical_operator", "AND")
+    else:
+        positions = None
+        logical_operator = "AND"
+    if not isinstance(positions, list):
+        positions = [requested_position]
+    if not positions or any(not isinstance(position, str) for position in positions):
+        return False
+
+    evidence = [str((scope or {}).get("conditions") or "")]
+    if isinstance(source, dict):
+        evidence.append(str(source.get("evidence") or ""))
+        qualifications = source.get("qualification_sources") or []
+        if isinstance(qualifications, list):
+            evidence.extend(
+                str(item.get("evidence") or "")
+                for item in qualifications
+                if isinstance(item, dict)
+            )
+
+    candidate_value = candidate.get("parsed_value") or parse_value(
+        candidate.get("raw_value") or ""
+    )
+    if (
+        candidate_value.get("type") == "mixed"
+        and isinstance(candidate_value.get("parsed_value"), dict)
+    ):
+        candidate_value = candidate_value["parsed_value"]
+    if candidate_value.get("type") != "scalar":
+        return False
+
+    capacity_pattern = re.compile(
+        r"\b(?:maximum|max\.?)\s+weight\s+capacity\b",
+        re.IGNORECASE,
+    )
+    numeric_units = re.compile(
+        r"(?P<value>\d[\d,]*(?:\.\d+)?)\s*"
+        r"(?P<unit>kg|kilograms?|lbs?|pounds?)\b",
+        re.IGNORECASE,
+    )
+    matched_positions = set()
+    for text in evidence:
+        normalized_text = re.sub(r"\bmax\.", "max", text, flags=re.IGNORECASE)
+        for clause in re.split(r"[.;\n]+", normalized_text):
+            if not capacity_pattern.search(clause):
+                continue
+            if re.search(
+                r"\b(?:not|never|no|cannot|can't|prohibited|excluded)\b",
+                clause,
+                re.IGNORECASE,
+            ):
+                continue
+            quantities = list(numeric_units.finditer(clause))
+            if not quantities:
+                continue
+            for position in positions:
+                position_phrase = position.replace("_", " ")
+                if not re.search(
+                    rf"(?<!\w){re.escape(position_phrase)}(?!\w)",
+                    clause,
+                    re.IGNORECASE,
+                ):
+                    continue
+                for quantity in quantities:
+                    value = float(quantity.group("value").replace(",", ""))
+                    unit = quantity.group("unit")
+                    try:
+                        candidate_value_in_unit = convert(
+                            float(candidate_value["value"]),
+                            candidate_value["unit"],
+                            unit,
+                        )
+                    except (TypeError, ValueError):
+                        continue
+                    tolerance = max(abs(candidate_value_in_unit) * 0.01, 0.01)
+                    if abs(value - candidate_value_in_unit) > tolerance:
+                        continue
+                    matched_positions.add(position)
+
+    if logical_operator == "OR":
+        return bool(matched_positions)
+    return all(position in matched_positions for position in positions)
+
+
+def _combine_condition_statuses(statuses, logical_operator):
+    if not statuses or logical_operator == "AMBIGUOUS":
+        return "UNKNOWN"
+    if logical_operator == "OR":
+        if "PASS" in statuses:
+            return "PASS"
+        if "UNKNOWN" in statuses:
+            return "UNKNOWN"
+        return "FAIL"
+    if "FAIL" in statuses:
+        return "FAIL"
+    if "UNKNOWN" in statuses:
+        return "UNKNOWN"
+    return "PASS"
+
+
+def _source_load_distribution_evidence(source_texts):
+    phrases = (
+        ("even", re.compile(
+            r"\b(?:evenly|uniformly)[\s-]+loaded\b|"
+            r"\beven\s+surface\s+load\b",
+            re.IGNORECASE,
+        )),
+        ("uneven", re.compile(
+            r"\bunevenly[\s-]+loaded\b|\buneven\s+load(?:ed|ing)?\b|"
+            r"\basymmetrically[\s-]+loaded\b|\basymmetric\s+load\b|"
+            r"\bone[\s-]+sided\s+load(?:ed|ing)?\b|"
+            r"\bnon[\s-]*uniform\s+load(?:ed|ing)?\b|"
+            r"\bloaded\s+unevenly\b",
+            re.IGNORECASE,
+        )),
+    )
+    states = set()
+    unsupported = False
+    clause_boundary = re.compile(r"[.!?;]")
+    negation = re.compile(
+        r"(?:\bnot\b|\bnever\b|\bno\b)(?:[\s,():-]+\w+){0,5}"
+        r"[\s,():-]*$|(?:^|[\s,():-])non[\s-]*$",
+        re.IGNORECASE,
+    )
+    ambiguous_negation = re.compile(r"\bnot\s+only\b", re.IGNORECASE)
+
+    for text in source_texts:
+        for state, pattern in phrases:
+            for match in pattern.finditer(text):
+                prior = text[:match.start()]
+                boundary = max(
+                    (boundary.end() for boundary in clause_boundary.finditer(prior)),
+                    default=0,
+                )
+                prefix = prior[boundary:]
+                if ambiguous_negation.search(prefix):
+                    unsupported = True
+                    continue
+                negation_match = negation.search(prefix)
+                is_negated = bool(
+                    negation_match
+                    and not pattern.search(prefix[negation_match.end():])
+                )
+                states.add(
+                    f"not_{state}" if is_negated else state
+                )
+
+        if re.search(
+            r"\b(?:load distribution|loading pattern|"
+            r"(?:radial(?:ly)?|concentrated|asymmetric(?:ally)?|"
+            r"uneven(?:ly)?|uniform(?:ly)?) loading)\b|"
+            r"\bradially loaded\b",
+            text,
+            re.IGNORECASE,
+        ) and not any(pattern.search(text) for _, pattern in phrases):
+            unsupported = True
+
+    conflicting = bool(
+        {"even", "not_even"} <= states
+        or {"uneven", "not_uneven"} <= states
+        or {"even", "uneven"} <= states
+    )
+    return {
+        "states": states,
+        "conflicting": conflicting,
+        "unsupported": unsupported,
+    }
+
+
+def _source_maximum_inclinations(source_texts):
+    number = r"(\d+(?:\.\d+)?)\s*(?:degrees?|deg|°|�)"
+    patterns = (
+        re.compile(
+            r"\bmaximum\s+(?:(?:operating\s+)?tabletop\s+)?"
+            r"(?:inclination|tilt|angle)\b.{0,35}?\b(?:is|of|up to)?\s*"
+            + number,
+            re.IGNORECASE,
+        ),
+        re.compile(
+            r"\b(?:inclination|inclined|tilt(?:ed|ing)?|angle)\b.{0,80}?"
+            r"\b(?:no more than|not more than|at most|up to|limited to|"
+            r"(?:should|must|does|do) not exceed|not exceed|cannot exceed)\s*"
+            + number,
+            re.IGNORECASE,
+        ),
+        re.compile(
+            r"\b(?:inclination|inclined|tilt(?:ed|ing)?|angle)\b.{0,80}?"
+            r"\b(?:should|must|shall)\s+not\s+be\s+"
+            r"(?:tilted|inclined|exceeded)\s+beyond\s*" + number,
+            re.IGNORECASE,
+        ),
+        re.compile(
+            r"\btilt(?:ing)?\s+function\b.{0,50}?"
+            r"\bstops?\s+automatically\s+at\s*" + number,
+            re.IGNORECASE,
+        ),
+    )
+    values = set()
+    unsupported = False
+    angle_statement = re.compile(
+        r"\b(?:inclination|inclined|tilt(?:ed|ing)?|angle)\b[^.;!?]{0,100}?"
+        + number,
+        re.IGNORECASE,
+    )
+    for text in source_texts:
+        found_spans = []
+        for pattern in patterns:
+            for match in pattern.finditer(text):
+                values.add(float(match.group(1)))
+                found_spans.append(match.span())
+        for match in angle_statement.finditer(text):
+            if not any(
+                match.start() < end and start < match.end()
+                for start, end in found_spans
+            ):
+                unsupported = True
+    return values, unsupported
+
+
+def _evaluate_inclination_against_maximum(requested, maximum):
+    requested_value = float(requested["value"])
+    operator = requested.get("operator")
+    if operator == "=":
+        if requested_value > maximum:
+            return (
+                "FAIL",
+                f"The requested {requested_value:g}-degree inclination exceeds "
+                f"the source limit of {maximum:g} degrees.",
+            )
+        return (
+            "PASS",
+            f"The requested inclination is within the source limit "
+            f"of {maximum:g} degrees.",
+        )
+    if operator == "<=":
+        if requested_value >= maximum:
+            return (
+                "PASS",
+                f"The source maximum of {maximum:g} degrees satisfies the "
+                "requested upper bound.",
+            )
+        return (
+            "UNKNOWN",
+            "The source maximum does not establish the stricter requested "
+            "inclination bound.",
+        )
+    if operator == "<":
+        if requested_value > maximum:
+            return (
+                "PASS",
+                f"The source maximum of {maximum:g} degrees is below the "
+                "requested upper bound.",
+            )
+        return (
+            "UNKNOWN",
+            "The source maximum does not establish the stricter requested "
+            "inclination bound.",
+        )
+    if operator == ">":
+        status = "FAIL" if requested_value >= maximum else "UNKNOWN"
+        return (
+            status,
+            "The requested lower bound exceeds the source maximum."
+            if status == "FAIL"
+            else "The source maximum does not establish the requested lower bound.",
+        )
+    if operator == ">=":
+        status = "FAIL" if requested_value > maximum else "UNKNOWN"
+        return (
+            status,
+            "The requested lower bound exceeds the source maximum."
+            if status == "FAIL"
+            else "The source maximum does not establish the requested lower bound.",
+        )
+    return (
+        "UNKNOWN",
+        "The requested inclination relation is not established by the source.",
+    )
 
 
 def evaluate_requirement(requirement, product_value_text, candidate_attribute=None, candidate=None):

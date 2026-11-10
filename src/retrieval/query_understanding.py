@@ -4,6 +4,7 @@ import re
 
 from src.retrieval.query_schema import QueryCondition, QueryPlan
 from src.retrieval.requirement_parser import (
+    ATTRIBUTE_ALIASES,
     classify_query_intent,
     extract_search_terms,
     find_attribute,
@@ -13,7 +14,11 @@ from src.retrieval.requirement_parser import (
 
 
 def _condition_segments(question):
-    pieces = re.split(r"\s+\b(and|or)\b\s+", question, flags=re.IGNORECASE)
+    pieces = re.split(
+        r"\s+\b(and|or)\b(?!\s+(?:table\s+)?column\b)\s+",
+        question,
+        flags=re.IGNORECASE,
+    )
     segments = []
     logical_operators = []
     for index, piece in enumerate(pieces):
@@ -39,8 +44,25 @@ def _condition_from_text(text):
     )
 
 
+def _entity_query_prefix(question):
+    normalized = re.sub(r"[^a-z0-9]+", " ", question.lower()).strip()
+    attribute_starts = []
+    for alias in ATTRIBUTE_ALIASES:
+        normalized_alias = re.sub(r"[^a-z0-9]+", " ", alias.lower()).strip()
+        if not normalized_alias:
+            continue
+        match = re.search(
+            rf"(?<!\w){re.escape(normalized_alias)}(?!\w)",
+            normalized,
+        )
+        if match:
+            attribute_starts.append(match.start())
+    return normalized[:min(attribute_starts)] if attribute_starts else normalized
+
+
 def _entity_references(question, product_records, include_all_matches=False):
-    query_terms = set(extract_search_terms(question))
+    query_prefix = _entity_query_prefix(question)
+    query_terms = set(extract_search_terms(query_prefix))
     generic_terms = {
         "bed", "beds", "table", "tables", "product", "products", "model",
         "models", "device", "devices", "which", "what", "does", "have",
@@ -58,6 +80,18 @@ def _entity_references(question, product_records, include_all_matches=False):
         if not product_terms:
             continue
         overlap = query_terms & product_terms
+        normalized_question = re.sub(
+            r"[^a-z0-9]+",
+            " ",
+            question.lower(),
+        ).strip()
+        normalized_product = re.sub(
+            r"[^a-z0-9]+",
+            " ",
+            str(product).lower(),
+        ).strip()
+        if normalized_product and normalized_product in normalized_question:
+            overlap |= product_terms
         if overlap:
             matches.append((len(overlap), str(product), overlap))
 

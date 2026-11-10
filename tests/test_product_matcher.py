@@ -72,6 +72,71 @@ def test_match_requirement_returns_unknown_for_unsupported_queries():
     assert results[0]["status"] == "UNKNOWN"
 
 
+@pytest.mark.parametrize(
+    ("query", "expected_product"),
+    [
+        (
+            "Hillrom 900 Accella bed maximum patient weight at least 185 kg",
+            "Hillrom 900 Accella Bed",
+        ),
+        (
+            "Affinity 4 Birthing Bed maximum lift capacity at least 500 lbs",
+            "Affinity 4 Birthing Bed",
+        ),
+        (
+            "TS 7500 Surgical Table maximum weight capacity for OR table column SF "
+            "at least 400 kg",
+            "TS 7500 OR System Table",
+        ),
+    ],
+)
+def test_full_matcher_keeps_product_identity_separate_from_component_and_scope(
+    monkeypatch,
+    query,
+    expected_product,
+):
+    records = [
+        {
+            "product": "Hillrom 900 Accella Bed",
+            "document": "hillrom.pdf",
+            "product_kind": "medical_bed",
+            "identity_reliable": True,
+        },
+        {
+            "product": "Affinity 4 Birthing Bed",
+            "document": "affinity.pdf",
+            "product_kind": "medical_bed",
+            "identity_reliable": True,
+        },
+        {
+            "product": "PST-500 Mobile Operating Table",
+            "document": "pst500.pdf",
+            "product_kind": "surgical_equipment",
+            "identity_reliable": True,
+        },
+        {
+            "product": "TS 7500 OR System Table",
+            "document": "ts7500.pdf",
+            "product_kind": "surgical_equipment",
+            "identity_reliable": True,
+        },
+        {
+            "product": "TruSystem 7500 Column UM",
+            "document": "trusystem.pdf",
+            "product_kind": "surgical_equipment",
+            "identity_reliable": True,
+        },
+    ]
+    monkeypatch.setattr(product_matcher, "_catalogue_records", lambda: records)
+    monkeypatch.setattr(product_matcher, "_load_processed_specifications", lambda: [])
+    monkeypatch.setattr(product_matcher, "_load_processed_chunks", lambda: [])
+
+    results = match_requirement(query)
+
+    assert [result["product"] for result in results] == [expected_product]
+    assert results[0]["status"] == "UNKNOWN"
+
+
 def test_validate_requirement_evidence_rejects_mass_vs_length_mismatch():
     requirement = {"attribute": "Weight", "operator": ">=", "value": 200, "unit": "kg"}
     assert validate_requirement_evidence(requirement, "Weight", "200 cm") is False
@@ -1336,6 +1401,258 @@ def _match_real_pst_permissible_load(
         ),
         (
             "Permissible load for chapter 5.11.2 (1), normal orientation, "
+            "inclination <=15 degrees and tilt >=20 degrees, at least 400 kg",
+            "FAIL",
+            "454 kg / 1000 lbs",
+        ),
+        (
+            "Permissible load for chapter 5.11.2 (1), normal orientation, "
+            "inclination at most 15 degrees and on an incline, at least 400 kg",
+            "UNKNOWN",
+            "454 kg / 1000 lbs",
+        ),
+        (
+            "Permissible load for chapter 5.11.2 (1), normal orientation, "
+            "inclination at most 15 degrees and on a slope, at least 400 kg",
+            "UNKNOWN",
+            "454 kg / 1000 lbs",
+        ),
+        (
+            "Permissible load for chapter 5.11.2 (1), normal orientation, "
+            "not inclination at most 15 degrees, at least 400 kg",
+            "UNKNOWN",
+            "454 kg / 1000 lbs",
+        ),
+        (
+            "Permissible load for chapter 5.11.2 (1), normal orientation, "
+            "inclination should not exceed 14 degrees, at least 400 kg",
+            "UNKNOWN",
+            "454 kg / 1000 lbs",
+        ),
+        (
+            "Permissible load for chapter 5.11.2 (1), normal orientation, "
+            "inclination shouldn't exceed 14 degrees, at least 400 kg",
+            "UNKNOWN",
+            "454 kg / 1000 lbs",
+        ),
+        (
+            "Permissible load for chapter 5.11.2 (1), normal orientation, "
+            "inclination must not exceed 15 degrees, at least 400 kg",
+            "PASS",
+            "454 kg / 1000 lbs",
+        ),
+        (
+            "Permissible load for chapter 5.11.2 (1), normal orientation, "
+            "inclination no more than 15 degrees, at least 400 kg",
+            "PASS",
+            "454 kg / 1000 lbs",
+        ),
+        (
+            "Permissible load for chapter 5.11.2 (1), normal orientation, "
+            "inclination not more than 15 degrees, at least 400 kg",
+            "PASS",
+            "454 kg / 1000 lbs",
+        ),
+        (
+            "Permissible load for chapter 5.11.2 (1), normal orientation, "
+            "inclination not less than 15 degrees, at least 400 kg",
+            "UNKNOWN",
+            "454 kg / 1000 lbs",
+        ),
+        (
+            "Permissible load for chapter 5.11.2 (1), normal orientation, "
+            "inclination at least 15 degrees, at least 400 kg",
+            "UNKNOWN",
+            "454 kg / 1000 lbs",
+        ),
+        (
+            "Permissible load for chapter 5.11.2 (1), normal orientation, "
+            "inclination greater than 15 degrees, at least 400 kg",
+            "FAIL",
+            "454 kg / 1000 lbs",
+        ),
+        (
+            "Permissible load for chapter 5.11.2 (1), normal orientation, "
+            "inclination less than 15 degrees, at least 400 kg",
+            "UNKNOWN",
+            "454 kg / 1000 lbs",
+        ),
+        (
+            "Permissible load for chapter 5.11.2 (1), normal orientation, "
+            "inclination exactly 15 degrees, at least 400 kg",
+            "PASS",
+            "454 kg / 1000 lbs",
+        ),
+        (
+            "Permissible load for chapter 5.11.2 (1), normal orientation, "
+            "inclination at most 15 degrees or longitudinal travel not level, "
+            "at least 400 kg",
+            "UNKNOWN",
+            "454 kg / 1000 lbs",
+        ),
+        (
+            "Permissible load for chapter 5.11.2 (1), normal orientation, "
+            "inclination at most 15 degrees and inclination greater than 20 "
+            "degrees or inclination exactly 10 degrees, at least 400 kg",
+            "UNKNOWN",
+            "454 kg / 1000 lbs",
+        ),
+        (
+            "Permissible load for chapter 5.11.2 (1), normal orientation and "
+            "inverted orientation, longitudinal travel level, inclination at "
+            "most 15 degrees, evenly loaded, at least 400 kg",
+            "UNKNOWN",
+            "454 kg / 1000 lbs",
+        ),
+        (
+            "Permissible load for chapter 5.11.2 (1), normal orientation, "
+            "longitudinal travel level or longitudinal travel not level, "
+            "at least 400 kg",
+            "PASS",
+            "454 kg / 1000 lbs",
+        ),
+        (
+            "Permissible load for chapter 5.11.2 (1), normal orientation, "
+            "inclination >=20 degrees and tilt <=15 degrees, at least 400 kg",
+            "FAIL",
+            "454 kg / 1000 lbs",
+        ),
+        (
+            "Permissible load for chapter 5.11.2 (1), normal orientation, "
+            "tilt <=15 degrees and tilt 20 degrees, at least 400 kg",
+            "FAIL",
+            "454 kg / 1000 lbs",
+        ),
+        (
+            "Permissible load for chapter 5.11.2 (1), normal orientation, "
+            "inclination <=15 degrees, angle 20 degrees, at least 400 kg",
+            "FAIL",
+            "454 kg / 1000 lbs",
+        ),
+        (
+            "Permissible load for chapter 5.11.2 (1), normal orientation, "
+            "at 20 degrees and at most 15 degrees, at least 400 kg",
+            "FAIL",
+            "454 kg / 1000 lbs",
+        ),
+        (
+            "Permissible load for chapter 5.11.2 (1), normal orientation, "
+            "at most 15 degrees and at 20 degrees, at least 400 kg",
+            "FAIL",
+            "454 kg / 1000 lbs",
+        ),
+        (
+            "Permissible load for chapter 5.11.2 (1), normal orientation, "
+            "inclination at least 15 degrees, at least 400 kg",
+            "UNKNOWN",
+            "454 kg / 1000 lbs",
+        ),
+        (
+            "Permissible load for chapter 5.11.2 (1), normal orientation, "
+            "inclination at most 15 degrees, at least 400 kg",
+            "PASS",
+            "454 kg / 1000 lbs",
+        ),
+        (
+            "Permissible load for chapter 5.11.2 (1), normal orientation, "
+            "inclination exactly 15 degrees, at least 400 kg",
+            "PASS",
+            "454 kg / 1000 lbs",
+        ),
+        (
+            "Permissible load for chapter 5.11.2 (1), normal orientation, "
+            "inclination 20 degrees, at least 400 kg",
+            "FAIL",
+            "454 kg / 1000 lbs",
+        ),
+        (
+            "Permissible load for chapter 5.11.2 (1), normal orientation, "
+            "inclination 20 degrees or inclination at most 15 degrees, "
+            "at least 400 kg",
+            "PASS",
+            "454 kg / 1000 lbs",
+        ),
+        (
+            "Permissible load for chapter 5.11.2 (1), normal orientation, "
+            "inclination 20 degrees and/or inclination at most 15 degrees, "
+            "at least 400 kg",
+            "UNKNOWN",
+            "454 kg / 1000 lbs",
+        ),
+        (
+            "Permissible load for chapter 5.11.2 (1), normal orientation, "
+            "not evenly loaded, at least 400 kg",
+            "FAIL",
+            "454 kg / 1000 lbs",
+        ),
+        (
+            "Permissible load for chapter 5.11.2 (1), normal orientation, "
+            "not-evenly loaded, at least 400 kg",
+            "FAIL",
+            "454 kg / 1000 lbs",
+        ),
+        (
+            "Permissible load for chapter 5.11.2 (1), normal orientation, "
+            "not uniformly loaded, at least 400 kg",
+            "FAIL",
+            "454 kg / 1000 lbs",
+        ),
+        (
+            "Permissible load for chapter 5.11.2 (1), normal orientation, "
+            "unevenly loaded, at least 400 kg",
+            "FAIL",
+            "454 kg / 1000 lbs",
+        ),
+        (
+            "Permissible load for chapter 5.11.2 (1), normal orientation, "
+            "uneven load, at least 400 kg",
+            "FAIL",
+            "454 kg / 1000 lbs",
+        ),
+        (
+            "Permissible load for chapter 5.11.2 (1), normal orientation, "
+            "asymmetric load, at least 400 kg",
+            "FAIL",
+            "454 kg / 1000 lbs",
+        ),
+        (
+            "Permissible load for chapter 5.11.2 (1), normal orientation, "
+            "asymmetrically loaded, at least 400 kg",
+            "FAIL",
+            "454 kg / 1000 lbs",
+        ),
+        (
+            "Permissible load for chapter 5.11.2 (1), normal orientation, "
+            "one-sided loading, at least 400 kg",
+            "FAIL",
+            "454 kg / 1000 lbs",
+        ),
+        (
+            "Permissible load for chapter 5.11.2 (1), normal orientation, "
+            "nonuniform load, at least 400 kg",
+            "FAIL",
+            "454 kg / 1000 lbs",
+        ),
+        (
+            "Permissible load for chapter 5.11.2 (1), normal orientation, "
+            "non-uniform load, at least 400 kg",
+            "FAIL",
+            "454 kg / 1000 lbs",
+        ),
+        (
+            "Permissible load for chapter 5.11.2 (1), normal orientation, "
+            "loaded unevenly, at least 400 kg",
+            "FAIL",
+            "454 kg / 1000 lbs",
+        ),
+        (
+            "Permissible load for chapter 5.11.2 (1), normal orientation, "
+            "radially loaded, at least 400 kg",
+            "UNKNOWN",
+            "454 kg / 1000 lbs",
+        ),
+        (
+            "Permissible load for chapter 5.11.2 (1), normal orientation, "
             "inclination =15 degrees, at least 400 kg",
             "PASS",
             "454 kg / 1000 lbs",
@@ -1592,6 +1909,154 @@ def test_pst_original_pdf_shared_and_row_qualifications_stay_attached_to_rows(
     assert "restricted by 100 mm" in carbon["scope"]["conditions"].lower()
     assert "must be inclined by no more than 15" in (
         chapter_511_2["scope"]["conditions"].lower()
+    )
+
+
+def test_pst_original_pdf_conflicting_travel_qualifications_return_unknown(
+    monkeypatch,
+    pst_pdf_permissible_load_specs,
+):
+    extracted, _ = pst_pdf_permissible_load_specs
+    row = next(
+        item
+        for item in extracted
+        if item["attribute"] == "Permissible Load"
+        and item["scope"]["chapter"] == "5.11.2 (1)"
+    )
+    adversarial = {
+        **row,
+        "scope": dict(row["scope"]),
+        "source": dict(row["source"]),
+    }
+    adversarial["source"]["qualification_sources"] = list(
+        row["source"]["qualification_sources"]
+    ) + [
+        {
+            "document": row["source"]["document"],
+            "page": 46,
+            "section": row["source"]["section"],
+            "evidence": "Adversarial qualification: longitudinal travel must not be level.",
+        }
+    ]
+    adversarial["source"]["scope"] = adversarial["scope"]
+
+    results = _match_real_pst_permissible_load(
+        monkeypatch,
+        "Permissible load for chapter 5.11.2 (1), normal orientation, "
+        "longitudinal travel level, at least 400 kg",
+        [adversarial],
+    )
+    result = next(
+        item for item in results if item["product"] == "PST 500 Operating Table"
+    )
+
+    assert result["status"] == "UNKNOWN"
+    assert "conflicting" in result["reason"].lower()
+    assert any(
+        "must not be level" in source["evidence"]
+        for source in result["source"]["qualification_sources"]
+    )
+
+
+@pytest.mark.parametrize(
+    "adversarial_evidence",
+    [
+        "The maximum inclination is 20 degrees.",
+        "Inclination up to 20 degrees is permitted.",
+        "Inclination must not exceed 20 degrees.",
+        "Inclination is limited to 20 degrees.",
+    ],
+)
+def test_pst_original_pdf_conflicting_angle_limit_returns_unknown(
+    monkeypatch,
+    pst_pdf_permissible_load_specs,
+    adversarial_evidence,
+):
+    extracted, _ = pst_pdf_permissible_load_specs
+    row = next(
+        item
+        for item in extracted
+        if item["attribute"] == "Permissible Load"
+        and item["scope"]["chapter"] == "5.11.2 (1)"
+    )
+    adversarial = {
+        **row,
+        "scope": dict(row["scope"]),
+        "source": dict(row["source"]),
+    }
+    adversarial["source"]["qualification_sources"] = [
+        dict(item) for item in row["source"]["qualification_sources"]
+    ] + [
+        {
+            "document": row["source"]["document"],
+            "page": 47,
+            "section": "Adversarial maximum inclination",
+            "evidence": adversarial_evidence,
+        }
+    ]
+    adversarial["source"]["scope"] = adversarial["scope"]
+
+    results = _match_real_pst_permissible_load(
+        monkeypatch,
+        "Permissible load for chapter 5.11.2 (1), normal orientation, "
+        "inclination at most 15 degrees, at least 400 kg",
+        [adversarial],
+    )
+    result = next(
+        item for item in results if item["product"] == "PST 500 Operating Table"
+    )
+
+    assert result["status"] == "UNKNOWN"
+    assert "conflicting maximum-inclination" in result["reason"].lower()
+    assert any(
+        item["page"] == 47 and item["evidence"] == adversarial_evidence
+        for item in result["source"]["qualification_sources"]
+    )
+
+
+def test_pst_original_pdf_negated_loading_qualification_returns_unknown(
+    monkeypatch,
+    pst_pdf_permissible_load_specs,
+):
+    extracted, _ = pst_pdf_permissible_load_specs
+    row = next(
+        item
+        for item in extracted
+        if item["attribute"] == "Permissible Load"
+        and item["scope"]["chapter"] == "5.11.2 (1)"
+    )
+    adversarial = {
+        **row,
+        "scope": dict(row["scope"]),
+        "source": dict(row["source"]),
+    }
+    adversarial["source"]["qualification_sources"] = [
+        dict(item) for item in row["source"]["qualification_sources"]
+    ] + [
+        {
+            "document": row["source"]["document"],
+            "page": 47,
+            "section": "Adversarial loading qualification",
+            "evidence": "The maximum patient weight applies to a not evenly loaded tabletop.",
+        }
+    ]
+    adversarial["source"]["scope"] = adversarial["scope"]
+
+    results = _match_real_pst_permissible_load(
+        monkeypatch,
+        "Permissible load for chapter 5.11.2 (1), normal orientation, "
+        "evenly loaded, at least 400 kg",
+        [adversarial],
+    )
+    result = next(
+        item for item in results if item["product"] == "PST 500 Operating Table"
+    )
+
+    assert result["status"] == "UNKNOWN"
+    assert "conflicting" in result["reason"].lower()
+    assert any(
+        item["page"] == 47 and "not evenly loaded" in item["evidence"]
+        for item in result["source"]["qualification_sources"]
     )
 
 

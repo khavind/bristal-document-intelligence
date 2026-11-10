@@ -1,16 +1,20 @@
+import json
 import re
 from pathlib import Path
 
 import pymupdf
+import pytest
 
 from src.ingestion.chunker import chunk_page
 from src.ingestion.layout_inspector import extract_page_data
 from src.retrieval import product_matcher
+from src.retrieval.requirement_parser import parse_requirement
 from src.retrieval.spec_extractor import (
     create_source,
     extract_specifications_from_chunks,
     is_valid_attribute_value_pair,
 )
+from src.retrieval.unit_converter import convert
 from src.retrieval.value_parser import parse_value
 
 
@@ -298,6 +302,346 @@ def _extract_pdf_page_chunks(filename, page_number):
     return chunks
 
 
+def _extract_ts7500_capacity_pages():
+    pdf_path = (
+        Path(__file__).parents[1]
+        / "data"
+        / "raw"
+        / "TS_7500_Surgical_Table.pdf"
+    )
+    document = pymupdf.open(pdf_path)
+    chunks = []
+    next_chunk_id = 1
+    try:
+        for page_number in (2, 6):
+            page_data = extract_page_data(
+                document[page_number - 1],
+                page_number,
+            )
+            page_chunks, next_chunk_id = chunk_page(
+                page_number,
+                page_data["text"],
+                pdf_path.stem,
+                next_chunk_id,
+                page_data,
+            )
+            chunks.extend(page_chunks)
+    finally:
+        document.close()
+    return chunks, extract_specifications_from_chunks(chunks)
+
+
+def test_ts7500_original_pdf_preserves_patient_load_and_four_capacity_columns():
+    chunks, specifications = _extract_ts7500_capacity_pages()
+    patient_loads = [
+        item for item in specifications if item["attribute"] == "Patient Load"
+    ]
+    capacities = [
+        item for item in specifications
+        if item["attribute"] == "Max. weight capacity"
+    ]
+
+    assert len(patient_loads) == 1
+    assert patient_loads[0]["raw_value"] == "880 lb / 400 kg"
+    assert patient_loads[0]["parsed_value"] == {
+        "type": "scalar",
+        "value": 400.0,
+        "unit": "kg",
+    }
+    assert patient_loads[0]["source"]["document"] == "TS_7500_Surgical_Table"
+    assert patient_loads[0]["source"]["page"] == 2
+    assert patient_loads[0]["source"]["section"] == "CUTTING-EDGE TECHNOLOGY"
+    assert patient_loads[0]["source"]["evidence"] == (
+        "patient loads of up to 880 lb / 400 kg"
+    )
+
+    assert len(capacities) == 4
+    assert {
+        item["scope"]["configuration"] for item in capacities
+    } == {
+        "OR table column SF",
+        "OR table column SB",
+        "OR table column SM, hybrid MC2",
+        "OR table column hybrid SC, FC",
+    }
+    assert all(item["raw_value"] == "880 lbs (400 kg)" for item in capacities)
+    assert all(
+        item["parsed_value"] == {
+            "type": "scalar",
+            "value": 400.0,
+            "unit": "kg",
+        }
+        for item in capacities
+    )
+    assert all(item["source"]["page"] == 6 for item in capacities)
+    assert all(
+        item["source"]["section"] == "Technical Data in Detail"
+        for item in capacities
+    )
+    assert all(
+        item["scope"]["conditions"]
+        == "With restrictions, depending on position of patient."
+        for item in capacities
+    )
+    assert all(
+        item["scope"]["restriction"] == "position-dependent"
+        for item in capacities
+    )
+    assert all(
+        item["scope"]["configuration"] in item["source"]["evidence"]
+        and "Max. weight capacity" in item["source"]["evidence"]
+        and "880 lbs (400 kg)" in item["source"]["evidence"]
+        and "With restrictions, depending on position of patient."
+        in item["source"]["evidence"]
+        for item in capacities
+    )
+    assert abs(convert(880, "lb", "kg") - 400) / 400 < 0.01
+    assert len(chunks) > 0
+
+
+def test_ts7500_original_pdf_records_flow_through_processed_loader_and_matcher(
+    monkeypatch,
+    tmp_path,
+):
+    chunks, specifications = _extract_ts7500_capacity_pages()
+    document_name = "TS_7500_Surgical_Table"
+    specification_file = tmp_path / f"{document_name}_specifications.json"
+    chunk_file = tmp_path / f"{document_name}_chunks.json"
+    specification_file.write_text(
+        json.dumps(
+            {
+                "products": [
+                    {
+                        "product": "TS 7500 OR System Table",
+                        "specifications": specifications,
+                    }
+                ]
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    chunk_file.write_text(
+        json.dumps({"chunks": chunks}, ensure_ascii=False),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(product_matcher, "PROCESSED_DIR", tmp_path)
+
+    loaded_specs = product_matcher._load_processed_specifications()
+    capacity_specs = [
+        item for item in loaded_specs
+        if item["attribute"] == "Max. weight capacity"
+    ]
+    assert len(capacity_specs) == 4
+    assert all(item["source"]["page"] == 6 for item in capacity_specs)
+
+    catalogue = [
+        {
+            "product": "TS 7500 OR System Table",
+            "document": document_name,
+            "product_kind": "surgical_equipment",
+            "identity_reliable": True,
+        }
+    ]
+    query_statuses = {
+        "Maximum weight capacity for OR table column SF at least 400 kg": "UNKNOWN",
+        "Maximum weight capacity for OR table column SB at least 400 kg": "UNKNOWN",
+        "Maximum weight capacity for OR table column SM, hybrid MC2 at least 400 kg": "UNKNOWN",
+        "Maximum weight capacity for MC2 column at least 400 kg": "UNKNOWN",
+        "Maximum weight capacity for OR table column hybrid SC, FC at least 880 lb": "UNKNOWN",
+        "Maximum weight capacity for FC column at least 400 kg": "UNKNOWN",
+        "Maximum weight capacity for OR table column SF or OR table column SB "
+        "at least 400 kg": "UNKNOWN",
+        "Maximum weight capacity at least 400 kg": "UNKNOWN",
+        "Maximum weight capacity for OR table column SF in Trendelenburg position "
+        "at least 400 kg": "UNKNOWN",
+        "Maximum weight capacity for OR table column SB in Trendelenburg position "
+        "at least 400 kg": "UNKNOWN",
+        "Maximum weight capacity for OR table column SM, hybrid MC2 in Trendelenburg "
+        "position at least 400 kg": "UNKNOWN",
+        "Maximum weight capacity for OR table column hybrid SC, FC in Trendelenburg "
+        "position at least 880 lb": "UNKNOWN",
+        "Patient Load at least 400 kg": "PASS",
+        "Patient Load for OR table column SF at least 400 kg": "UNKNOWN",
+        "Safe Working Load at least 400 kg": "UNKNOWN",
+        "Maximum Patient Weight at least 400 kg": "UNKNOWN",
+        "Maximum Lift Capacity at least 400 kg": "UNKNOWN",
+    }
+
+    for query, expected_status in query_statuses.items():
+        requirement = parse_requirement(query)
+        if " SF or " in query:
+            assert requirement["configuration_scope"]["configuration_ambiguous"] is True
+        assert requirement["value"] == (880 if "880 lb" in query else 400)
+        assert requirement["unit"] == ("lb" if "880 lb" in query else "kg")
+        result = next(
+            item
+            for item in product_matcher._match_technical_requirement(
+                query,
+                catalogue_records=catalogue,
+            )
+            if item["product"] == "TS 7500 OR System Table"
+        )
+        assert result["status"] == expected_status, query
+        if expected_status == "PASS":
+            assert result["source"]["document"] == document_name
+            assert result["source"]["page"] in {2, 6}
+            assert result["source"]["evidence"]
+        if "Maximum weight capacity" in query and "for OR table column" in query:
+            assert result["source"]["page"] == 6
+            assert result["source"]["scope"]["configuration"]
+            assert "With restrictions, depending on position of patient." in (
+                result["source"]["evidence"]
+            )
+
+
+def test_ts7500_position_specific_capacity_pass_requires_direct_source_support(
+    monkeypatch,
+    tmp_path,
+):
+    chunks, specifications = _extract_ts7500_capacity_pages()
+    position_qualified = [
+        {
+            **item,
+            "scope": dict(item.get("scope") or {}),
+            "source": dict(item.get("source") or {}),
+        }
+        for item in specifications
+    ]
+    sf_capacity = next(
+        item
+        for item in position_qualified
+        if item["attribute"] == "Max. weight capacity"
+        and item["scope"]["configuration"] == "OR table column SF"
+    )
+    specific_qualification = (
+        "Maximum weight capacity of 400 kg is permitted in Trendelenburg position."
+    )
+    sf_capacity["scope"]["conditions"] += f" {specific_qualification}"
+    sf_capacity["source"]["scope"] = sf_capacity["scope"]
+    sf_capacity["source"]["qualification_sources"] = [
+        {
+            "document": "TS_7500_Surgical_Table",
+            "page": 6,
+            "section": "Technical Data in Detail",
+            "evidence": specific_qualification,
+        }
+    ]
+    document_name = "TS_7500_Surgical_Table"
+    (tmp_path / f"{document_name}_specifications.json").write_text(
+        json.dumps(
+            {
+                "products": [
+                    {
+                        "product": "TS 7500 OR System Table",
+                        "specifications": position_qualified,
+                    }
+                ]
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    (tmp_path / f"{document_name}_chunks.json").write_text(
+        json.dumps({"chunks": chunks}, ensure_ascii=False),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(product_matcher, "PROCESSED_DIR", tmp_path)
+    catalogue = [
+        {
+            "product": "TS 7500 OR System Table",
+            "document": document_name,
+            "product_kind": "surgical_equipment",
+            "identity_reliable": True,
+        }
+    ]
+
+    result = next(
+        item
+        for item in product_matcher._match_technical_requirement(
+            "Maximum weight capacity for OR table column SF in Trendelenburg "
+            "position at least 400 kg",
+            catalogue_records=catalogue,
+        )
+        if item["product"] == "TS 7500 OR System Table"
+    )
+
+    assert result["status"] == "PASS"
+    assert result["source"]["page"] == 6
+    assert result["scope"]["configuration"] == "OR table column SF"
+    assert any(
+        item["page"] == 6 and item["evidence"] == specific_qualification
+        for item in result["source"]["qualification_sources"]
+    )
+
+
+@pytest.mark.parametrize(
+    ("retained_attribute", "query", "expected_status"),
+    [
+        (
+            "Patient Load",
+            "Maximum weight capacity for OR table column SF at least 400 kg",
+            "UNKNOWN",
+        ),
+        (
+            "Max. weight capacity",
+            "Patient Load at least 400 kg",
+            "UNKNOWN",
+        ),
+    ],
+)
+def test_ts7500_page_two_and_page_six_load_concepts_are_not_interchangeable(
+    monkeypatch,
+    tmp_path,
+    retained_attribute,
+    query,
+    expected_status,
+):
+    chunks, specifications = _extract_ts7500_capacity_pages()
+    only_one_concept = [
+        item for item in specifications if item["attribute"] == retained_attribute
+    ]
+    document_name = "TS_7500_Surgical_Table"
+    (tmp_path / f"{document_name}_specifications.json").write_text(
+        json.dumps(
+            {
+                "products": [
+                    {
+                        "product": "TS 7500 OR System Table",
+                        "specifications": only_one_concept,
+                    }
+                ]
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    (tmp_path / f"{document_name}_chunks.json").write_text(
+        json.dumps({"chunks": chunks}, ensure_ascii=False),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(product_matcher, "PROCESSED_DIR", tmp_path)
+    catalogue = [
+        {
+            "product": "TS 7500 OR System Table",
+            "document": document_name,
+            "product_kind": "surgical_equipment",
+            "identity_reliable": True,
+        }
+    ]
+
+    result = next(
+        item
+        for item in product_matcher._match_technical_requirement(
+            query,
+            catalogue_records=catalogue,
+        )
+        if item["product"] == "TS 7500 OR System Table"
+    )
+
+    assert result["status"] == expected_status
+
+
 def _extract_affinity_page_three():
     return _extract_pdf_page_chunks(
         "207598-EN-r1_Affinity_SpecSheet-LR.pdf",
@@ -521,6 +865,241 @@ def test_pst500_several_days_battery_statement_is_not_converted_to_hours():
         for item in specifications
         if item["attribute"] == "Battery Backup"
     ]
+
+
+def test_trusystem_original_pages_preserve_load_and_power_supply_scope():
+    chunks = []
+    for page in (42, 76, 78):
+        chunks.extend(
+            _extract_pdf_page_chunks(
+                "TruSystem_7500_Column_UM.pdf",
+                page,
+            )
+        )
+    specifications = extract_specifications_from_chunks(chunks)
+
+    durations = [
+        item
+        for item in specifications
+        if item["attribute"] == "Electrical function movement duration"
+    ]
+    assert {
+        item["scope"]["configuration"]: item["raw_value"]
+        for item in durations
+    } == {
+        "mobile operating table column":
+            "approx. 1 hour (total duration of movement for electrical functions)",
+        "fixed installation operating table column":
+            "approx. 30 minutes (total duration of movement for electrical functions)",
+    }
+    assert all(
+        item["source"]["document"] == "TruSystem_7500_Column_UM"
+        and item["source"]["page"] == 42
+        and item["source"]["section"] == "5.1 Internal power supply"
+        and "fully charged" in item["source"]["evidence"]
+        and "total duration of movement for electrical functions"
+        in item["source"]["evidence"]
+        for item in durations
+    )
+    assert "lower speed" in next(
+        item["scope"]["conditions"]
+        for item in durations
+        if item["scope"]["configuration"].startswith("fixed")
+    )
+
+    loads = [
+        item
+        for item in specifications
+        if item["attribute"] == "Maximum operating table load"
+    ]
+    assert {
+        item["scope"]["configuration"]: item["raw_value"]
+        for item in loads
+    } == {
+        "mobile operating table column": "400 kg",
+        "fixed installation operating table column": "400 kg",
+    }
+    assert all(
+        item["source"]["page"] == 76
+        and "depending on the operating table equipment and patient weight"
+        in item["scope"]["conditions"]
+        and item["raw_value"] in item["source"]["evidence"]
+        for item in loads
+    )
+
+    batteries = [
+        item
+        for item in specifications
+        if item["attribute"] in {
+            "Battery Count",
+            "Battery Voltage",
+            "Battery Capacity",
+        }
+    ]
+    assert any(
+        item["attribute"] == "Battery Voltage"
+        and item["raw_value"] == "40.7 V each"
+        and item["source"]["page"] == 76
+        and item["scope"]["configuration"] == "mobile operating table column"
+        for item in batteries
+    )
+    assert any(
+        item["attribute"] == "Battery Capacity"
+        and item["raw_value"] == "4.7 Ah"
+        and item["source"]["page"] == 76
+        and item["scope"]["configuration"] == "mobile operating table column"
+        for item in batteries
+    )
+    assert any(
+        item["attribute"] == "Battery Count"
+        and item["raw_value"] == "1 rechargeable batteries"
+        and item["source"]["page"] == 76
+        and item["scope"]["configuration"]
+        == "fixed installation operating table column"
+        and "Hybrid MR" in item["source"]["evidence"]
+        for item in batteries
+    )
+    assert any(
+        item["attribute"] == "Battery Voltage"
+        and item["raw_value"] == "40.7 V"
+        and item["source"]["page"] == 78
+        and item["scope"]["power_supply"] == "External power supply unit"
+        for item in batteries
+    )
+    assert not any(
+        item["attribute"] == "Battery Backup"
+        for item in specifications
+    )
+
+
+def test_pst500_original_page_electrical_values_remain_separate():
+    chunks = _extract_pdf_page_chunks(
+        "PST-500-Mobile-Operating-Table_IFU-DEC2019.pdf",
+        80,
+    )
+    specifications = extract_specifications_from_chunks(chunks)
+    electrical = [
+        item
+        for item in specifications
+        if item["attribute"] in {
+            "Battery Count",
+            "Battery Voltage",
+            "Battery Capacity",
+        }
+    ]
+
+    assert {
+        item["attribute"]: item["raw_value"]
+        for item in electrical
+    } == {
+        "Battery Count": "3 batteries",
+        "Battery Voltage": "12 V",
+        "Battery Capacity": "12 Ah",
+    }
+    assert all(
+        item["source"]["document"]
+        == "PST-500-Mobile-Operating-Table_IFU-DEC2019"
+        and item["source"]["page"] == 80
+        and item["source"]["section"] == "12.1 Device data"
+        and item["scope"]["power_supply"] == "Internal power supply"
+        and "Internal power supply 3 batteries 12 V / 12 Ah"
+        in item["source"]["evidence"]
+        for item in electrical
+    )
+    assert not any(
+        item["attribute"] == "Battery Backup"
+        for item in specifications
+    )
+
+
+@pytest.mark.parametrize(
+    ("filename", "pages", "product", "document", "query"),
+    [
+        (
+            "TruSystem_7500_Column_UM.pdf",
+            (42, 76, 78),
+            "TruSystem 7500 Column UM",
+            "TruSystem_7500_Column_UM",
+            "Battery backup at least 1 hour",
+        ),
+        (
+            "PST-500-Mobile-Operating-Table_IFU-DEC2019.pdf",
+            (80,),
+            "PST-500 Mobile Operating Table",
+            "PST-500-Mobile-Operating-Table_IFU-DEC2019",
+            "Battery backup at least 1 hour",
+        ),
+    ],
+)
+def test_electrical_values_do_not_satisfy_generic_battery_runtime_queries(
+    monkeypatch,
+    tmp_path,
+    filename,
+    pages,
+    product,
+    document,
+    query,
+):
+    chunks = []
+    for page in pages:
+        chunks.extend(_extract_pdf_page_chunks(filename, page))
+    specifications = extract_specifications_from_chunks(chunks)
+    (tmp_path / f"{document}_chunks.json").write_text(
+        json.dumps({"chunks": chunks}, ensure_ascii=False),
+        encoding="utf-8",
+    )
+    (tmp_path / f"{document}_specifications.json").write_text(
+        json.dumps(
+            {"products": [{"product": product, "specifications": specifications}]},
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(product_matcher, "PROCESSED_DIR", tmp_path)
+    monkeypatch.setattr(
+        product_matcher,
+        "_catalogue_records",
+        lambda: [
+            {
+                "product": product,
+                "document": document,
+                "product_kind": "surgical_equipment",
+                "identity_reliable": True,
+            }
+        ],
+    )
+
+    loaded_specifications = product_matcher._load_processed_specifications()
+    if "TruSystem" in filename:
+        assert any(
+            item["attribute"] == "Electrical function movement duration"
+            and item["source"]["page"] == 42
+            for item in loaded_specifications
+        )
+        assert {
+            item["scope"]["configuration"]
+            for item in loaded_specifications
+            if item["attribute"] == "Maximum operating table load"
+        } == {
+            "mobile operating table column",
+            "fixed installation operating table column",
+        }
+        assert any(
+            item["attribute"] == "Battery Voltage"
+            and item["source"]["page"] == 78
+            and item["scope"]["power_supply"] == "External power supply unit"
+            for item in loaded_specifications
+        )
+    else:
+        assert {
+            item["attribute"]
+            for item in loaded_specifications
+            if item["source"]["page"] == 80
+        } >= {"Battery Count", "Battery Voltage", "Battery Capacity"}
+
+    result = product_matcher.match_requirement(query)[0]
+
+    assert result["status"] == "UNKNOWN"
 
 
 def test_pst500_incomplete_permissible_load_is_rejected():

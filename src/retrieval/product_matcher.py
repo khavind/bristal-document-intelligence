@@ -972,16 +972,54 @@ def _match_technical_requirement(query, plan=None, catalogue_records=None):
             )
         ]
         attribute_specs = product_specs
-        if attributes_equivalent(
-            requirement.get("attribute"),
-            "Permissible Load",
-        ) and attribute_specs:
-            requested_scope = requirement.get("configuration_scope")
+        has_configured_values = any(
+            isinstance(specification.get("scope"), dict)
+            and specification["scope"].get("configuration")
+            for specification in attribute_specs
+        )
+        requested_scope = requirement.get("configuration_scope")
+        if (
+            attribute_specs
+            and requested_scope
+            and requested_scope.get("configuration_terms")
+            and not has_configured_values
+        ):
+            results.append(
+                _unknown_configuration_result(
+                    query,
+                    product_name,
+                    requirement.get("attribute"),
+                    attribute_specs,
+                    "The source evidence does not associate this attribute with "
+                    "the requested configuration.",
+                )
+            )
+            continue
+        requires_configuration = (
+            attributes_equivalent(
+                requirement.get("attribute"),
+                "Permissible Load",
+            )
+            or has_configured_values
+        )
+        if requires_configuration and attribute_specs:
             scoped_specs = [
                 specification
                 for specification in attribute_specs
                 if isinstance(specification.get("scope"), dict)
+                and specification["scope"].get("configuration")
             ]
+            if requested_scope and requested_scope.get("configuration_ambiguous"):
+                results.append(
+                    _unknown_configuration_result(
+                        query,
+                        product_name,
+                        requirement.get("attribute"),
+                        attribute_specs,
+                        "The request names more than one distinct table configuration.",
+                    )
+                )
+                continue
             if not requested_scope:
                 results.append(
                     _unknown_configuration_result(
@@ -989,7 +1027,8 @@ def _match_technical_requirement(query, plan=None, catalogue_records=None):
                         product_name,
                         requirement.get("attribute"),
                         attribute_specs,
-                        "The permissible load is configuration-dependent, but "
+                        f"The {requirement.get('attribute')} is "
+                        "configuration-dependent, but "
                         "the requested configuration is unspecified.",
                     )
                 )
@@ -1009,7 +1048,7 @@ def _match_technical_requirement(query, plan=None, catalogue_records=None):
                         product_name,
                         requirement.get("attribute"),
                         attribute_specs,
-                        "No permissible-load evidence matches the explicitly "
+                        f"No {requirement.get('attribute')} evidence matches the explicitly "
                         "requested configuration and orientation.",
                     )
                 )
@@ -1022,7 +1061,7 @@ def _match_technical_requirement(query, plan=None, catalogue_records=None):
                         requirement.get("attribute"),
                         matching_scope_specs,
                         "The requested scope matches more than one "
-                        "configuration-specific permissible-load value; "
+                        f"configuration-specific {requirement.get('attribute')} value; "
                         "provide a more specific configuration or orientation.",
                     )
                 )

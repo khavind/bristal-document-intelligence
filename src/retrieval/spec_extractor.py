@@ -637,6 +637,12 @@ def is_likely_attribute(line):
         normalized.endswith(" section")
         and has_technical_attribute_term(line)
     )
+    documented_operating_table_load = bool(
+        re.fullmatch(
+            r"maximum\s+operating\s+table\s+load",
+            normalized,
+        )
+    )
     if (
         normalized in NOISE_ATTRIBUTES
         and not technical_section_label
@@ -647,8 +653,7 @@ def is_likely_attribute(line):
         return False
 
     if looks_like_generic_metadata_label(line) and not (
-        line.lower().endswith(" section")
-        and has_technical_attribute_term(line)
+        documented_operating_table_load or technical_section_label
     ):
         return False
 
@@ -935,9 +940,19 @@ def is_valid_attribute_value_pair(attribute, raw_value, parsed_value, chunk=None
     if attribute.startswith(bullet_prefixes) or raw_value.startswith(bullet_prefixes):
         return False
 
+    documented_operating_table_load = bool(
+        re.fullmatch(
+            r"maximum\s+operating\s+table\s+load",
+            attribute,
+            re.IGNORECASE,
+        )
+    )
     if looks_like_generic_metadata_label(attribute) and not (
-        attribute.lower().endswith(" section")
-        and has_technical_attribute_term(attribute)
+        documented_operating_table_load
+        or (
+            attribute.lower().endswith(" section")
+            and has_technical_attribute_term(attribute)
+        )
     ):
         return False
 
@@ -953,7 +968,27 @@ def is_valid_attribute_value_pair(attribute, raw_value, parsed_value, chunk=None
     if not is_likely_attribute(attribute):
         return False
 
-    if not is_likely_technical_value(raw_value, parsed_value):
+    documented_movement_duration = bool(
+        re.fullmatch(
+            r"electrical function movement duration",
+            attribute,
+            re.IGNORECASE,
+        )
+        and re.fullmatch(
+            r"approx\.\s*\d+\s+(?:hours?|minutes?)\s*"
+            r"\(total duration of movement for electrical functions\)",
+            raw_value,
+            re.IGNORECASE,
+        )
+        and isinstance(parsed_value, dict)
+        and parsed_value.get("type") == "mixed"
+        and isinstance(parsed_value.get("parsed_value"), dict)
+        and parsed_value["parsed_value"].get("type") == "scalar"
+        and parsed_value["parsed_value"].get("unit") in {"hours", "minutes"}
+    )
+    if not is_likely_technical_value(raw_value, parsed_value) and not (
+        documented_movement_duration
+    ):
         return False
 
     if _is_quantity_attribute_with_nested_row_label(attribute, raw_value, parsed_value):
@@ -1637,6 +1672,631 @@ def _extract_layout_table_specifications(chunk):
     return specifications, suppressed
 
 
+def _extract_patient_load_specifications(chunk):
+    text = re.sub(r"\s+", " ", str(chunk.get("text") or "")).strip()
+    match = re.search(
+        r"\bpatient loads? of up to\s+"
+        r"(?P<value>\d[\d,]*\s*(?:lbs?|pounds?)\s*/\s*"
+        r"(?P<metric>\d[\d,]*\s*kg))\b",
+        text,
+        re.IGNORECASE,
+    )
+    if not match:
+        return []
+
+    raw_value = re.sub(r"\s+", " ", match.group("value")).strip()
+    specifications = []
+    layout_blocks = (chunk.get("layout") or {}).get("blocks") or []
+    overview_section = None
+    for block in layout_blocks:
+        heading = re.search(
+            r"\bCUTTING-EDGE\s+TECHNOLOGY\b",
+            str(block.get("text") or ""),
+            re.IGNORECASE,
+        )
+        if heading:
+            overview_section = re.sub(r"\s+", " ", heading.group(0)).strip()
+            break
+    add_specification(
+        specifications,
+        "Patient Load",
+        raw_value,
+        chunk,
+        source_evidence=match.group(0),
+        source_section=overview_section or chunk.get("section"),
+    )
+    specifications[-1]["parsed_value"] = parse_value(match.group("metric"))
+    return specifications
+
+
+def _normalized_source_text(value):
+    return re.sub(r"\s+", " ", str(value or "")).strip()
+
+
+def _page_source_blocks(page_chunks):
+    blocks = {}
+    for chunk in page_chunks:
+        for block in (chunk.get("layout") or {}).get("blocks") or []:
+            if not isinstance(block, dict):
+                continue
+            text = _normalized_source_text(block.get("text"))
+            if not text:
+                continue
+            key = (
+                block.get("block"),
+                text,
+                tuple(block.get("bbox") or ()),
+            )
+            blocks.setdefault(key, block)
+    return list(blocks.values())
+
+
+def _source_chunk_for_block(page_chunks, block_text):
+    normalized_block = _normalized_source_text(block_text).casefold()
+    for chunk in page_chunks:
+        normalized_chunk = _normalized_source_text(chunk.get("text")).casefold()
+        if normalized_block and normalized_block in normalized_chunk:
+            return chunk
+    return page_chunks[0]
+
+
+def _suppress_source_block(suppressed, block):
+    for line in str(block.get("text") or "").splitlines():
+        if clean_line(line):
+            suppressed[_line_key(line)] += 1
+
+
+def _add_scoped_electrical_value(
+    specifications,
+    attribute,
+    raw_value,
+    page_chunks,
+    source_evidence,
+    source_section,
+    scope,
+):
+    chunk = _source_chunk_for_block(page_chunks, source_evidence)
+    add_specification(
+        specifications,
+        attribute,
+        raw_value,
+        chunk,
+        source_evidence=source_evidence,
+        source_section=source_section,
+        scope=scope,
+    )
+
+
+def _extract_verified_product_page_specifications(page_chunks):
+    """Extract verified configuration- and supply-scoped electrical table rows."""
+    if not page_chunks:
+        return [], Counter()
+
+    document = str(page_chunks[0].get("document") or "").casefold()
+    page = page_chunks[0].get("page")
+    blocks = _page_source_blocks(page_chunks)
+    specifications = []
+    suppressed = Counter()
+
+    if "trusystem_7500_column_um" in document and page == 42:
+        runtime_pattern = re.compile(
+            r"\bWith the set of batteries fully charged, the use of the "
+            r"electric operating table functions is guaranteed for "
+            r"approx\.\s*(?P<duration>\d+\s+(?:hour|hours|minute|minutes))"
+            r"\s*\(total duration of movement for electrical functions\)\.",
+            re.IGNORECASE,
+        )
+        for block in blocks:
+            text = _normalized_source_text(block.get("text"))
+            match = runtime_pattern.search(text)
+            if not match:
+                continue
+            lowered = text.casefold()
+            configuration = (
+                "fixed installation operating table column"
+                if "fixed installation operating table column" in lowered
+                else "mobile operating table column"
+                if "mobile operating table column" in lowered
+                else None
+            )
+            if not configuration:
+                continue
+            scope = {
+                "configuration": configuration,
+                "power_supply": "Internal power supply",
+                "conditions": (
+                    "set of batteries fully charged; "
+                    "electrical functions are blocked when the set is depleted "
+                    "or almost completely depleted"
+                ),
+                "measurement_basis": (
+                    "total duration of movement for electrical functions"
+                ),
+            }
+            if configuration.startswith("fixed"):
+                scope["conditions"] += (
+                    "; emergency power supply in the event of a power failure; "
+                    "electrical functions move at a lower speed during battery operation"
+                )
+            _add_scoped_electrical_value(
+                specifications,
+                "Electrical function movement duration",
+                (
+                    f"approx. {match.group('duration')} "
+                    "(total duration of movement for electrical functions)"
+                ),
+                page_chunks,
+                text,
+                "5.1 Internal power supply",
+                scope,
+            )
+            duration_specification = specifications[-1]
+            duration_specification["parsed_value"] = {
+                "type": "mixed",
+                "raw": duration_specification["raw_value"],
+                "parsed_value": parse_value(match.group("duration")),
+                "description": (
+                    "approx.; total duration of movement for electrical functions"
+                ),
+            }
+            battery_count = re.search(
+                r"\bTwo lithium ion batteries\b",
+                text,
+                re.IGNORECASE,
+            )
+            if battery_count:
+                _add_scoped_electrical_value(
+                    specifications,
+                    "Battery Count",
+                    battery_count.group(0),
+                    page_chunks,
+                    text,
+                    "5.1 Internal power supply",
+                    {
+                        "configuration": configuration,
+                        "power_supply": "Internal power supply",
+                    },
+                )
+                specifications[-1]["parsed_value"] = {
+                    "type": "scalar",
+                    "value": 2,
+                    "unit": "batteries",
+                }
+
+    if "trusystem_7500_column_um" in document and page == 76:
+        headings = []
+        for block in blocks:
+            text = _normalized_source_text(block.get("text"))
+            if re.fullmatch(
+                r"(?:Mobile operating table column|"
+                r"Fixed installation operating table column)",
+                text,
+                re.IGNORECASE,
+            ):
+                headings.append(
+                    (
+                        float((block.get("bbox") or [0, 0])[1]),
+                        text.casefold(),
+                    )
+                )
+
+        def configuration_for(block):
+            y0 = float((block.get("bbox") or [0, 0])[1])
+            preceding = [heading for heading in headings if heading[0] < y0]
+            if not preceding:
+                return None
+            return max(preceding, key=lambda heading: heading[0])[1]
+
+        load_pattern = re.compile(
+            r"\bMaximum operating table load\s+"
+            r"(?P<value>\d[\d,]*\s*kg)"
+            r"(?:\s*(?P<condition>\([^)]*\)))?",
+            re.IGNORECASE,
+        )
+        for block in blocks:
+            text = _normalized_source_text(block.get("text"))
+            load = load_pattern.search(text)
+            if not load:
+                continue
+            configuration = configuration_for(block)
+            if not configuration:
+                continue
+            scope = {"configuration": configuration}
+            if load.group("condition"):
+                scope["conditions"] = load.group("condition").strip("()")
+            _add_scoped_electrical_value(
+                specifications,
+                "Maximum operating table load",
+                load.group("value"),
+                page_chunks,
+                text,
+                "16.3 Operating table column",
+                scope,
+            )
+            _suppress_source_block(suppressed, block)
+
+        battery_pattern = re.compile(
+            r"\bI\.\s*P\.\s*S,\s*"
+            r"(?P<count>\d+)\s+rechargeable batteries,\s*"
+            r"(?P<voltage>\d+(?:\.\d+)?\s*V(?:\s+each)?)"
+            r"(?:\s+(?P<capacity>\d+(?:\.\d+)?\s*Ah))?",
+            re.IGNORECASE,
+        )
+        for block in blocks:
+            text = _normalized_source_text(block.get("text"))
+            battery = battery_pattern.search(text)
+            if not battery:
+                continue
+            configuration = configuration_for(block)
+            if not configuration:
+                continue
+            source_blocks = [block]
+            label = next(
+                (
+                    candidate
+                    for candidate in blocks
+                    if "internal power supply (i.p.s)" in
+                    _normalized_source_text(candidate.get("text")).casefold()
+                    and abs(
+                        float((candidate.get("bbox") or [0, 0])[1])
+                        - float((block.get("bbox") or [0, 0])[1])
+                    ) <= 24
+                    and candidate is not block
+                ),
+                None,
+            )
+            if label:
+                source_blocks.insert(0, label)
+            variant_note = next(
+                (
+                    candidate
+                    for candidate in blocks
+                    if "hybrid mr" in
+                    _normalized_source_text(candidate.get("text")).casefold()
+                    and 0 <= float((candidate.get("bbox") or [0, 0])[1])
+                    - float((block.get("bbox") or [0, 0])[1]) <= 32
+                ),
+                None,
+            )
+            if variant_note:
+                source_blocks.append(variant_note)
+            source_evidence = "\n".join(
+                _normalized_source_text(candidate.get("text"))
+                for candidate in source_blocks
+            )
+            scope = {
+                "configuration": configuration,
+                "power_supply": "Internal power supply (I.P.S)",
+            }
+            if variant_note:
+                scope["variant_note"] = _normalized_source_text(
+                    variant_note.get("text")
+                )
+            _add_scoped_electrical_value(
+                specifications,
+                "Battery Count",
+                battery.group("count") + " rechargeable batteries",
+                page_chunks,
+                source_evidence,
+                "16.3 Operating table column",
+                scope,
+            )
+            _add_scoped_electrical_value(
+                specifications,
+                "Battery Voltage",
+                battery.group("voltage"),
+                page_chunks,
+                source_evidence,
+                "16.3 Operating table column",
+                scope,
+            )
+            if battery.group("capacity"):
+                _add_scoped_electrical_value(
+                    specifications,
+                    "Battery Capacity",
+                    battery.group("capacity"),
+                    page_chunks,
+                    source_evidence,
+                    "16.3 Operating table column",
+                    scope,
+                )
+            for source_block in source_blocks:
+                _suppress_source_block(suppressed, source_block)
+
+    if "trusystem_7500_column_um" in document and page == 78:
+        for block in blocks:
+            text = _normalized_source_text(block.get("text"))
+            battery = re.search(
+                r"\bBattery\s+(?P<count>\d+ rechargeable batteries),\s*"
+                r"(?P<voltage>\d+(?:\.\d+)?\s*V)\s+"
+                r"(?P<capacity>\d+(?:\.\d+)?\s*Ah)\b",
+                text,
+                re.IGNORECASE,
+            )
+            if not battery:
+                continue
+            scope = {"power_supply": "External power supply unit"}
+            for attribute, raw_value in (
+                ("Battery Count", battery.group("count")),
+                ("Battery Voltage", battery.group("voltage")),
+                ("Battery Capacity", battery.group("capacity")),
+            ):
+                _add_scoped_electrical_value(
+                    specifications,
+                    attribute,
+                    raw_value,
+                    page_chunks,
+                    text,
+                    "16.4 External power supply unit",
+                    scope,
+                )
+            _suppress_source_block(suppressed, block)
+
+    if (
+        "pst-500-mobile-operating-table_ifu-dec2019" in document
+        and page == 80
+    ):
+        for block in blocks:
+            text = _normalized_source_text(block.get("text"))
+            battery = re.search(
+                r"\bInternal power supply\s+"
+                r"(?P<count>\d+ batteries)\s+"
+                r"(?P<voltage>\d+(?:\.\d+)?\s*V)\s*/\s*"
+                r"(?P<capacity>\d+(?:\.\d+)?\s*Ah)\b",
+                text,
+                re.IGNORECASE,
+            )
+            if not battery:
+                continue
+            scope = {"power_supply": "Internal power supply"}
+            for attribute, raw_value in (
+                ("Battery Count", battery.group("count")),
+                ("Battery Voltage", battery.group("voltage")),
+                ("Battery Capacity", battery.group("capacity")),
+            ):
+                _add_scoped_electrical_value(
+                    specifications,
+                    attribute,
+                    raw_value,
+                    page_chunks,
+                    text,
+                    "12.1 Device data",
+                    scope,
+                )
+            _suppress_source_block(suppressed, block)
+
+    return specifications, suppressed
+
+
+def _extract_configured_weight_capacity_specifications(chunk, page_words=None):
+    text_lines = [
+        _normalize_extracted_line(line)
+        for line in (chunk.get("text") or "").splitlines()
+        if clean_line(line)
+    ]
+    label_pattern = re.compile(
+        r"\bmax(?:imum)?\.?\s+weight\s+capacity(?:\s*\d+)?\b",
+        re.IGNORECASE,
+    )
+    normalized_chunk_text = re.sub(
+        r"\s+",
+        " ",
+        str(chunk.get("text") or ""),
+    )
+    if not label_pattern.search(normalized_chunk_text):
+        return [], Counter()
+
+    suppressed = Counter(
+        _line_key(line)
+        for line in text_lines
+        if re.fullmatch(r"max(?:imum)?\.?\s+weight|capacity\d*", line, re.I)
+    )
+    layout = chunk.get("layout") or {}
+    blocks = layout.get("blocks") or []
+    capacity_block = next(
+        (
+            block
+            for block in blocks
+            if label_pattern.search(
+                re.sub(r"\s+", " ", str(block.get("text") or ""))
+            )
+        ),
+        None,
+    )
+    words = layout.get("words") or []
+    if not capacity_block or not words:
+        return [], suppressed
+
+    capacity_block_id = capacity_block.get("block")
+    words = page_words or words
+    capacity_words = [word for word in words if word.get("block") == capacity_block_id]
+    lines = _layout_lines_by_block(capacity_words).get(capacity_block_id, [])
+    label_index = next(
+        (
+            index
+            for index, line in enumerate(lines)
+            if re.search(r"\bmax(?:imum)?\.?\s+weight\b", line["text"], re.I)
+        ),
+        None,
+    )
+    if label_index is None:
+        return [], suppressed
+
+    value_columns = []
+    for line in lines[label_index + 1:]:
+        clusters = []
+        for word in line["words"]:
+            if (
+                clusters
+                and word["x0"] - clusters[-1][-1]["x1"] > _LAYOUT_COLUMN_GAP
+            ):
+                clusters.append([])
+            if not clusters:
+                clusters.append([])
+            clusters[-1].append(word)
+        if len(clusters) != 4:
+            continue
+        values = []
+        for cluster in clusters:
+            raw_value = " ".join(word["text"] for word in cluster).strip()
+            parsed_value = parse_value(raw_value)
+            if not is_valid_attribute_value_pair(
+                "Max. weight capacity",
+                raw_value,
+                parsed_value,
+            ):
+                values = []
+                break
+            values.append(
+                {
+                    "raw_value": raw_value,
+                    "parsed_value": parsed_value,
+                    "center": (
+                        cluster[0]["x0"] + cluster[-1]["x1"]
+                    ) / 2,
+                }
+            )
+        if values:
+            value_columns = values
+            break
+
+    for line in lines[label_index + 1:]:
+        suppressed[_line_key(line["text"])] += 1
+    if len(value_columns) != 4:
+        return [], suppressed
+
+    centers = [column["center"] for column in value_columns]
+    boundaries = [
+        (centers[index] + centers[index + 1]) / 2
+        for index in range(len(centers) - 1)
+    ]
+    header_blocks = [
+        block
+        for block in blocks
+        if re.search(r"\bor\s+table\s+column\b", str(block.get("text") or ""), re.I)
+    ]
+    if not header_blocks:
+        return [], suppressed
+    header_block_ids = {block.get("block") for block in header_blocks}
+    header_words = [
+        word
+        for word in words
+        if word.get("block") in header_block_ids
+    ]
+    header_baselines = [
+        (word["bbox"][1] + word["bbox"][3]) / 2
+        for word in header_words
+    ]
+    nearest_header_y = max(header_baselines, default=None)
+    capacity_row_y = max(
+        (word["y0"] + word["y1"]) / 2
+        for line in lines[label_index + 1:]
+        for word in line["words"]
+    )
+    if nearest_header_y is None or nearest_header_y >= capacity_row_y:
+        return [], suppressed
+
+    header_words = [
+        word
+        for word in words
+        if centers[0] - 60
+        <= (word["bbox"][0] + word["bbox"][2]) / 2
+        <= centers[-1] + 60
+        and abs(
+            (word["bbox"][1] + word["bbox"][3]) / 2 - nearest_header_y
+        ) <= 18
+    ]
+    header_words = [
+        word
+        for word in header_words
+        if abs(
+            (word["bbox"][1] + word["bbox"][3]) / 2 - nearest_header_y
+        ) <= 18
+    ]
+    configurations = []
+    for index, column in enumerate(value_columns):
+        lower = (
+            centers[index - 1] + centers[index]
+        ) / 2 if index else centers[index] - (
+            centers[1] - centers[0]
+        ) / 2
+        upper = (
+            centers[index] + centers[index + 1]
+        ) / 2 if index < len(centers) - 1 else centers[index] + (
+            centers[-1] - centers[-2]
+        ) / 2
+        column_words = [
+            word
+            for word in header_words
+            if lower <= (
+                word["bbox"][0] + word["bbox"][2]
+            ) / 2 < upper
+        ]
+        column_words.sort(key=lambda word: (
+            round((word["bbox"][1] + word["bbox"][3]) / 2, 1),
+            word["bbox"][0],
+        ))
+        configuration = re.sub(
+            r"\s+",
+            " ",
+            " ".join(word["text"] for word in column_words),
+        ).strip()
+        if not re.search(r"\bor\s+table\s+column\b", configuration, re.I):
+            return [], suppressed
+        configurations.append(configuration)
+
+    footnote = next(
+        (
+            match.group(0)
+            for block in blocks
+            for match in [
+                re.search(
+                    r"1\.\s*With restrictions, depending on position of patient\.",
+                    str(block.get("text") or ""),
+                    re.IGNORECASE,
+                )
+            ]
+            if match
+        ),
+        None,
+    )
+    if not footnote:
+        return [], suppressed
+
+    specifications = []
+    table_label = "Max. weight capacity¹"
+    for column, configuration in zip(value_columns, configurations):
+        raw_value = column["raw_value"]
+        scope = {
+            "configuration": configuration,
+            "conditions": footnote[3:],
+            "restriction": "position-dependent",
+        }
+        source_evidence = (
+            f"{configuration}\n{table_label}\n{raw_value}\n{footnote}"
+        )
+        add_specification(
+            specifications,
+            "Max. weight capacity",
+            raw_value,
+            chunk,
+            scope=scope,
+            source_evidence=source_evidence,
+            source_section="Technical Data in Detail",
+        )
+        metric_value = re.search(
+            r"\(\s*(\d[\d,]*(?:\.\d+)?)\s*(kg|g)\s*\)",
+            raw_value,
+            re.IGNORECASE,
+        )
+        if metric_value:
+            specifications[-1]["parsed_value"] = parse_value(
+                f"{metric_value.group(1)} {metric_value.group(2)}"
+            )
+
+    return specifications, suppressed
+
+
 def _remove_suppressed_lines(lines, suppressed):
     remaining = Counter(suppressed)
     filtered = []
@@ -1678,11 +2338,51 @@ def extract_specifications_from_chunks(chunks, product_name=None):
     multi-column PDF tables. Those require separate table-aware handling.
     """
     specifications = []
+    page_words = {}
+    page_chunks = {}
+    for chunk in chunks:
+        layout = chunk.get("layout") or {}
+        key = (chunk.get("document"), chunk.get("page"))
+        page_chunks.setdefault(key, []).append(chunk)
+        collected = page_words.setdefault(key, {})
+        for word in layout.get("words") or []:
+            word_key = (
+                word.get("block"),
+                word.get("line"),
+                word.get("word"),
+            )
+            collected[word_key] = word
+
+    verified_page_specifications = {}
+    for key, chunks_for_page in page_chunks.items():
+        verified_page_specifications[key] = (
+            _extract_verified_product_page_specifications(chunks_for_page)
+        )
 
     for chunk in chunks:
+        page_key = (chunk.get("document"), chunk.get("page"))
+        electrical_suppressed = verified_page_specifications.get(
+            page_key,
+            ([], Counter()),
+        )[1].copy()
+        specifications.extend(_extract_patient_load_specifications(chunk))
+        capacity_specifications, capacity_suppressed = (
+            _extract_configured_weight_capacity_specifications(
+                chunk,
+                page_words.get(
+                    (chunk.get("document"), chunk.get("page")),
+                    {},
+                ).values(),
+            )
+        )
+        specifications.extend(capacity_specifications)
         specifications.extend(
             _extract_pst_permissible_load_specifications(chunk)
         )
+        if chunk is page_chunks[page_key][0]:
+            specifications.extend(
+                verified_page_specifications.get(page_key, ([], Counter()))[0]
+            )
         patient_weight_specifications, patient_weight_suppressed = (
             _extract_component_patient_weight_specifications(chunk)
         )
@@ -1700,7 +2400,10 @@ def extract_specifications_from_chunks(chunks, product_name=None):
         lines = merge_wrapped_bullet_lines(
             _remove_suppressed_lines(
                 raw_lines,
-                patient_weight_suppressed + suppressed_lines,
+                patient_weight_suppressed
+                + capacity_suppressed
+                + suppressed_lines
+                + electrical_suppressed,
             )
         )
         i = 0

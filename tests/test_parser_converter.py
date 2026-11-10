@@ -4,6 +4,7 @@ from src.retrieval.value_parser import parse_value
 from src.retrieval.unit_converter import convert
 from src.retrieval.requirement_parser import (
     classify_query,
+    find_component,
     find_value_and_unit,
     parse_requirement,
 )
@@ -90,6 +91,19 @@ def test_parser_normalizes_spaced_and_compound_units():
     parsed = parse_value("10 to 40 °C")
     assert parsed["type"] == "range"
     assert parsed["unit"] == "°C"
+
+
+@pytest.mark.parametrize(
+    ("query", "component"),
+    [
+        ("Hillrom 900 Accella bed maximum patient weight at least 185 kg", None),
+        ("Bed maximum patient weight at least 185 kg", "Bed"),
+        ("Maximum patient weight for Bed at least 185 kg", "Bed"),
+        ("Maximum lift capacity for Foot section at least 180 kg", "Foot section"),
+    ],
+)
+def test_component_requires_clear_component_syntax(query, component):
+    assert find_component(query) == component
 
 def test_two_dimension_value():
     parsed = parse_value("372 mm x 311 mm")
@@ -308,6 +322,7 @@ def test_unrecognized_pst_operating_condition_is_marked_unsupported():
         ("inclination less than 15 degrees", "<"),
         ("inclination no greater than 15 degrees", "<="),
         ("tilt at least 15 degrees", ">="),
+        ("inclination exactly 15 degrees", "="),
     ],
 )
 def test_pst_inclination_comparison_operator_is_preserved(
@@ -354,6 +369,264 @@ def test_pst_supported_condition_phrases_are_retained(
 
     for key, value in expected_condition.items():
         assert requirement["condition_scope"][key] == value
+
+
+@pytest.mark.parametrize(
+    ("phrase", "expected_conditions", "expected_operator"),
+    [
+        (
+            "inclination <=15 degrees and tilt >=20 degrees",
+            [("<=", 15), (">=", 20)],
+            "AND",
+        ),
+        (
+            "inclination >=20 degrees and tilt <=15 degrees",
+            [(">=", 20), ("<=", 15)],
+            "AND",
+        ),
+        ("tilt <=15 degrees and tilt 20 degrees", [("<=", 15), ("=", 20)], "AND"),
+        (
+            "inclination <=15 degrees, angle 20 degrees",
+            [("<=", 15), ("=", 20)],
+            "AND",
+        ),
+        ("at 20 degrees and at most 15 degrees", [("=", 20), ("<=", 15)], "AND"),
+        ("at most 15 degrees and at 20 degrees", [("<=", 15), ("=", 20)], "AND"),
+        (
+            "inclination 20 degrees or inclination at most 15 degrees",
+            [("=", 20), ("<=", 15)],
+            "OR",
+        ),
+        (
+            "inclination 20 degrees and inclination 15 degrees or inclination 10 degrees",
+            [("=", 20), ("=", 15), ("=", 10)],
+            "AMBIGUOUS",
+        ),
+        (
+            "inclination 20 degrees and/or inclination at most 15 degrees",
+            [("=", 20), ("<=", 15)],
+            "AMBIGUOUS",
+        ),
+    ],
+)
+def test_pst_all_inclination_conditions_and_connectors_are_retained(
+    phrase,
+    expected_conditions,
+    expected_operator,
+):
+    requirement = parse_requirement(
+        "Permissible load for chapter 5.11.2 (1), normal orientation, "
+        f"{phrase}, at least 400 kg"
+    )
+    parsed = requirement["condition_scope"]["inclination"]
+    conditions = parsed.get("conditions", [parsed])
+
+    assert [
+        (condition["operator"], condition["value"])
+        for condition in conditions
+    ] == expected_conditions
+    if len(conditions) > 1:
+        assert parsed["logical_operator"] == expected_operator
+
+
+def test_pst_single_unqualified_inclination_is_retained_as_equality():
+    requirement = parse_requirement(
+        "Permissible load for chapter 5.11.2 (1), normal orientation, "
+        "inclination 20 degrees, at least 400 kg"
+    )
+
+    assert requirement["condition_scope"]["inclination"] == {
+        "operator": "=",
+        "value": 20.0,
+        "unit": "degrees",
+    }
+
+
+@pytest.mark.parametrize(
+    ("phrase", "expected_operator"),
+    [
+        ("inclination should not exceed 14 degrees", "<="),
+        ("inclination must not exceed 15 degrees", "<="),
+        ("inclination no more than 15 degrees", "<="),
+        ("inclination at most 15 degrees", "<="),
+        ("inclination at least 15 degrees", ">="),
+        ("inclination greater than 15 degrees", ">"),
+        ("inclination less than 15 degrees", "<"),
+        ("inclination at most 15 degrees", "<="),
+        ("inclination no less than 15 degrees", ">="),
+        ("inclination not more than 15 degrees", "<="),
+        ("inclination not less than 15 degrees", ">="),
+        ("inclination exactly 15 degrees", "="),
+    ],
+)
+def test_pst_inclination_language_operators_are_parsed_explicitly(
+    phrase,
+    expected_operator,
+):
+    requirement = parse_requirement(
+        "Permissible load for chapter 5.11.2 (1), normal orientation, "
+        f"{phrase}, at least 400 kg"
+    )
+
+    assert requirement["condition_scope"]["inclination"]["operator"] == expected_operator
+    assert requirement["condition_scope"]["inclination"]["value"] == (
+        14.0 if "14 degrees" in phrase else 15.0
+    )
+
+
+@pytest.mark.parametrize(
+    "phrase",
+    [
+        "inclination shouldn't exceed 14 degrees",
+        "inclination doesn't exceed 14 degrees",
+        "inclination around 14 degrees",
+        "inclination no greater 14 degrees",
+    ],
+)
+def test_pst_unsupported_inclination_operator_is_not_defaulted_to_equality(phrase):
+    requirement = parse_requirement(
+        "Permissible load for chapter 5.11.2 (1), normal orientation, "
+        f"{phrase}, at least 400 kg"
+    )
+
+    assert requirement["condition_scope"]["inclination"]["operator"] is None
+    assert requirement["condition_scope"]["unsupported"] is True
+
+
+def test_pst_negated_angle_relation_is_not_treated_as_positive():
+    requirement = parse_requirement(
+        "Permissible load for chapter 5.11.2 (1), normal orientation, "
+        "not inclination at most 15 degrees, at least 400 kg"
+    )
+
+    assert requirement["condition_scope"]["inclination"]["operator"] == "<="
+    assert requirement["condition_scope"]["unsupported"] is True
+
+
+def test_pst_unknown_slope_clause_is_retained_as_unsupported_with_angle():
+    requirement = parse_requirement(
+        "Permissible load for chapter 5.11.2 (1), normal orientation, "
+        "inclination at most 15 degrees and on an incline, at least 400 kg"
+    )
+
+    assert requirement["condition_scope"]["inclination"]["operator"] == "<="
+    assert requirement["condition_scope"]["unsupported"] is True
+
+
+def test_pst_slope_clause_is_unsupported_even_with_recognized_angle():
+    requirement = parse_requirement(
+        "Permissible load for chapter 5.11.2 (1), normal orientation, "
+        "inclination at most 15 degrees and on a slope, at least 400 kg"
+    )
+
+    assert requirement["condition_scope"]["inclination"]["operator"] == "<="
+    assert requirement["condition_scope"]["unsupported"] is True
+
+
+def test_pst_conflicting_orientations_are_not_silently_collapsed():
+    requirement = parse_requirement(
+        "Permissible load for chapter 5.11.2 (1), normal orientation and "
+        "inverted orientation, longitudinal travel level, inclination at "
+        "most 15 degrees, evenly loaded, at least 400 kg"
+    )
+
+    assert requirement["configuration_scope"]["orientation"] == "Normal"
+    assert requirement["configuration_scope"]["orientation_conflict"] is True
+    assert requirement["condition_scope"]["unsupported"] is True
+
+
+@pytest.mark.parametrize(
+    ("phrase", "expected_conditions", "expected_operator"),
+    [
+        (
+            "longitudinal travel level or longitudinal travel not level",
+            ["level", "not_level"],
+            "OR",
+        ),
+        (
+            "longitudinal travel level and longitudinal travel not level",
+            ["level", "not_level"],
+            "AND",
+        ),
+    ],
+)
+def test_pst_travel_condition_alternatives_preserve_connectors(
+    phrase,
+    expected_conditions,
+    expected_operator,
+):
+    requirement = parse_requirement(
+        "Permissible load for chapter 5.11.2 (1), normal orientation, "
+        f"{phrase}, at least 400 kg"
+    )
+
+    assert requirement["condition_scope"]["longitudinal_travel"] == {
+        "conditions": expected_conditions,
+        "logical_operator": expected_operator,
+    }
+
+
+@pytest.mark.parametrize(
+    ("phrase", "expected"),
+    [
+        ("evenly loaded", "even"),
+        ("evenly-loaded", "even"),
+        ("uniformly loaded", "even"),
+        ("not evenly loaded", "not_even"),
+        ("not-evenly loaded", "not_even"),
+        ("not uniformly loaded", "not_even"),
+        ("unevenly loaded", "uneven"),
+        ("uneven load", "uneven"),
+        ("asymmetric load", "uneven"),
+        ("asymmetrically loaded", "uneven"),
+        ("one-sided loading", "uneven"),
+        ("nonuniform load", "uneven"),
+        ("non-uniform load", "uneven"),
+        ("loaded unevenly", "uneven"),
+    ],
+)
+def test_pst_load_distribution_phrases_preserve_polarity(phrase, expected):
+    requirement = parse_requirement(
+        "Permissible load for chapter 5.11.2 (1), normal orientation, "
+        f"{phrase}, at least 400 kg"
+    )
+
+    assert requirement["condition_scope"]["load_distribution"] == expected
+
+
+def test_conflicting_load_distribution_phrases_are_marked_unsupported():
+    requirement = parse_requirement(
+        "Permissible load for chapter 5.11.2 (1), normal orientation, "
+        "evenly loaded and unevenly loaded, at least 400 kg"
+    )
+
+    assert requirement["condition_scope"]["unsupported"] is True
+
+
+def test_load_distribution_or_alternatives_preserve_connector():
+    requirement = parse_requirement(
+        "Permissible load for chapter 5.11.2 (1), normal orientation, "
+        "evenly loaded or unevenly loaded, at least 400 kg"
+    )
+
+    assert requirement["condition_scope"]["load_distribution"] == {
+        "conditions": ["even", "uneven"],
+        "logical_operator": "OR",
+    }
+
+
+def test_position_or_alternatives_preserve_connector():
+    requirement = parse_requirement(
+        "Permissible load for chapter 5.11.2 (1), normal orientation, "
+        "Trendelenburg position or reverse Trendelenburg position, "
+        "at least 400 kg"
+    )
+
+    assert requirement["condition_scope"]["position"] == {
+        "conditions": ["trendelenburg", "reverse_trendelenburg"],
+        "logical_operator": "OR",
+    }
+    assert "unsupported" not in requirement["condition_scope"]
 
 
 @pytest.mark.parametrize(
